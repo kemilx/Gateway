@@ -123,6 +123,79 @@ public sealed class ProxyTests
     }
 
     [Fact]
+    public async Task Partial_content_json_is_closed_without_upstream_body_or_metadata()
+    {
+        await using var hosts = await Hosts.Start(app => app.MapGet("/case", async context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status206PartialContent;
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength = Encoding.UTF8.GetByteCount(SyntheticApi.Sample);
+            context.Response.Headers.ContentRange = $"bytes 0-{context.Response.ContentLength - 1}/{context.Response.ContentLength + 1}";
+            context.Response.Headers.AcceptRanges = "bytes";
+            context.Response.Headers.ETag = "\"raw-partial\"";
+            context.Response.Headers.LastModified = "Wed, 14 Oct 2026 12:00:00 GMT";
+            context.Response.Headers["Content-Digest"] = "synthetic-upstream-digest";
+            context.Response.Headers["X-Sensitive-Upstream"] = SyntheticApi.Pan;
+            await context.Response.WriteAsync(SyntheticApi.Sample);
+        }));
+        using var response = await hosts.Client.GetAsync("/protected/case");
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", body);
+        Assert.DoesNotContain(SyntheticApi.Pan, body);
+        Assert.Equal(Encoding.UTF8.GetByteCount(body), response.Content.Headers.ContentLength);
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType!.ToString());
+        Assert.True(response.Headers.CacheControl!.NoStore);
+        foreach (var header in new[] { "ETag", "Last-Modified", "Content-Digest", "Content-Range",
+                     "Accept-Ranges", "Content-Encoding", "Transfer-Encoding", "X-Sensitive-Upstream" })
+        {
+            Assert.DoesNotContain(response.Headers.Concat(response.Content.Headers),
+                entry => string.Equals(entry.Key, header, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    [Fact]
+    public async Task Interrupted_upstream_body_is_closed_without_early_headers_or_body()
+    {
+        var firstFlushed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var abort = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var hosts = await Hosts.Start(app => app.MapGet("/case", async context =>
+        {
+            context.Response.ContentType = "application/json";
+            // Valid JSON, but the declared final newline is never sent: this exercises a transport
+            // failure, not a JSON parse failure or a connection closed before response headers.
+            context.Response.ContentLength = Encoding.UTF8.GetByteCount(SyntheticApi.Sample) + 1;
+            context.Response.Headers["X-Sensitive-Upstream"] = SyntheticApi.Pan;
+            context.Response.Headers.ETag = "\"raw-interrupted\"";
+            await context.Response.WriteAsync(SyntheticApi.Sample);
+            await context.Response.Body.FlushAsync();
+            firstFlushed.TrySetResult();
+            try { await abort.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally { context.Abort(); }
+        }));
+        var pending = hosts.Client.GetAsync("/protected/case", HttpCompletionOption.ResponseHeadersRead);
+        try
+        {
+            await firstFlushed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            // A negative observation needs a bounded window. ResponseHeadersRead would complete
+            // on any downstream headers; this timeout asserts silence while upstream is held open.
+            await Assert.ThrowsAsync<TimeoutException>(async () =>
+                await pending.WaitAsync(TimeSpan.FromMilliseconds(250)));
+        }
+        finally { abort.TrySetResult(); }
+        using var response = await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        var body = await response.Content.ReadAsStringAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", body);
+        Assert.DoesNotContain(SyntheticApi.Pan, body);
+        Assert.False(response.Headers.Contains("X-Sensitive-Upstream"));
+        Assert.Null(response.Headers.ETag);
+        Assert.Equal(Encoding.UTF8.GetByteCount(body), response.Content.Headers.ContentLength);
+        Assert.True(response.Headers.CacheControl!.NoStore);
+        Assert.Contains(hosts.Logs.Messages, x => x.Contains("response blocked"));
+    }
+
+    [Fact]
     public async Task Invalid_utf8_is_closed_without_echoing_body()
     {
         await using var hosts = await Hosts.Start(app => app.MapGet("/case", async context =>
