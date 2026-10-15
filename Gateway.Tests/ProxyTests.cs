@@ -314,6 +314,9 @@ public sealed class ProxyTests
         policy["PanPolicies:Policies:0:RouteId"] = "passthrough";
         policy["PanPolicies:Policies:0:Selector"] = "$.account.details.pan";
         policy["PanPolicies:Policies:0:MaxBodyBytes"] = "128";
+        policy["PanPolicies:CoverageContract:Version"] = "v2";
+        policy["PanPolicies:CoverageContract:Required:0:RouteId"] = "passthrough";
+        policy["PanPolicies:CoverageContract:Required:0:Selector"] = "$.account.details.pan";
         const string body = "{\"account\":{\"details\":{\"pan\":\"4111111111111111\"}},\"payment\":{\"cardNumber\":\"untouched\"}}";
         await using var hosts = await Hosts.Start(app =>
         {
@@ -350,6 +353,8 @@ public sealed class ProxyTests
     {
         var policy = PolicyConfiguration.Defaults();
         policy["PanPolicies:Policies:0:Selector"] = "$.a.b.c";
+        policy["PanPolicies:CoverageContract:Version"] = "v2";
+        policy["PanPolicies:CoverageContract:Required:0:Selector"] = "$.a.b.c";
         const string body = "{\"a\":{\"b\":{\"c\":\"4111111111111111\",\"c\":null},\"b\":{\"c\":\"4111111111111111\"}},\"a\":{\"b\":{\"c\":\"4111111111111111\"}}}";
         await using var hosts = await Hosts.Start(app => MapBody(app, body), policy);
         Assert.Equal(body.Replace(SyntheticApi.Pan, "************1111"),

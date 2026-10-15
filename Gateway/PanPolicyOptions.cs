@@ -9,7 +9,20 @@ namespace Gateway;
 public sealed class PanPolicyOptions
 {
     public const string SectionName = "PanPolicies";
+    public PanCoverageContract? CoverageContract { get; set; }
     public List<PanPolicyDefinition> Policies { get; set; } = [];
+}
+
+public sealed class PanCoverageContract
+{
+    public string Version { get; set; } = "";
+    public List<PanCoverageRequirement> Required { get; set; } = [];
+}
+
+public sealed class PanCoverageRequirement
+{
+    public string RouteId { get; set; } = "";
+    public string Selector { get; set; } = "";
 }
 
 public sealed class PanPolicyDefinition
@@ -42,14 +55,32 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
             if (policy is null || !SafeIdentifier(policy.PolicyId) || !SafeIdentifier(policy.Version)
                 || !SafeIdentifier(policy.RouteId) || !knownRouteIds.Contains(policy.RouteId) || !routes.Add(policy.RouteId)
                 || !string.Equals(policy.Mode, "Mask", StringComparison.Ordinal)
-                || policy.Selector is null || policy.Selector.Length > 1041 || !Selector.IsMatch(policy.Selector)
+                || !SafeSelector(policy.Selector)
                 || policy.MaxBodyBytes is <= 0 or > MaximumBodyBytes)
                 return ValidateOptionsResult.Fail("Invalid PAN policy: check identifiers, unique existing RouteId, exact Mask mode, object selector and body limit.");
+        }
+
+        var contract = options.CoverageContract;
+        if (contract is null || !SafeIdentifier(contract.Version) || contract.Required is not { Count: > 0 and <= 32 })
+            return ValidateOptionsResult.Fail("PanPolicies requires a coverage contract with a safe Version and between 1 and 32 requirements.");
+
+        var requiredRoutes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var requirement in contract.Required)
+        {
+            if (requirement is null || !SafeIdentifier(requirement.RouteId)
+                || !knownRouteIds.Contains(requirement.RouteId) || !requiredRoutes.Add(requirement.RouteId)
+                || !SafeSelector(requirement.Selector))
+                return ValidateOptionsResult.Fail("Invalid PAN coverage requirement: check unique existing RouteId and object selector.");
+
+            if (!options.Policies.Any(policy => string.Equals(policy.RouteId, requirement.RouteId, StringComparison.Ordinal)
+                && string.Equals(policy.Selector, requirement.Selector, StringComparison.Ordinal)))
+                return ValidateOptionsResult.Fail("PAN policies do not satisfy the minimum coverage contract.");
         }
         return ValidateOptionsResult.Success;
     }
 
     private static bool SafeIdentifier(string? value) => value is { Length: > 0 and <= 64 } && Identifier.IsMatch(value);
+    private static bool SafeSelector(string? value) => value is { Length: > 0 and <= 1041 } && Selector.IsMatch(value);
 }
 
 public sealed record CompiledPanPolicy(string PolicyId, string Version, string RouteId,
