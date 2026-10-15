@@ -8,11 +8,10 @@ namespace Gateway;
 
 public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger)
 {
-    public const int MaxBodyBytes = 1024 * 1024;
     private static readonly byte[] Failure = "{\"code\":\"privacy_inspection_failed\"}"u8.ToArray();
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
-    public async ValueTask ApplyAsync(ResponseTransformContext context)
+    public async ValueTask ApplyAsync(ResponseTransformContext context, CompiledPanPolicy policy)
     {
         var response = context.HttpContext.Response;
         response.Headers.CacheControl = "no-store";
@@ -34,7 +33,7 @@ public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger)
         {
             if (content.Headers.ContentEncoding.Count != 0 || response.StatusCode == 206
                 || (media.CharSet is not null && !string.Equals(media.CharSet.Trim('"'), "utf-8", StringComparison.OrdinalIgnoreCase))
-                || content.Headers.ContentLength > MaxBodyBytes)
+                || content.Headers.ContentLength > policy.MaxBodyBytes)
                 throw new InspectionException();
 
             await using var source = await content.ReadAsStreamAsync(context.CancellationToken);
@@ -45,9 +44,9 @@ public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger)
                 while (true)
                 {
                     var count = await source.ReadAsync(buffer.AsMemory(0,
-                        (int)Math.Min(buffer.Length, MaxBodyBytes + 1L - captured.Length)), context.CancellationToken);
+                        (int)Math.Min(buffer.Length, policy.MaxBodyBytes + 1L - captured.Length)), context.CancellationToken);
                     if (count == 0) break;
-                    if (captured.Length + count > MaxBodyBytes) throw new InspectionException();
+                    if (captured.Length + count > policy.MaxBodyBytes) throw new InspectionException();
                     captured.Write(buffer, 0, count);
                 }
             }
@@ -58,15 +57,17 @@ public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger)
             using var document = JsonDocument.Parse(captured.GetBuffer().AsMemory(0, (int)captured.Length),
                 new JsonDocumentOptions { MaxDepth = 64 });
             using var transformed = new MemoryStream();
+            bool changed;
             using (var writer = new Utf8JsonWriter(transformed))
-                WriteRoot(document.RootElement, writer);
-            output = transformed.ToArray();
-            logger.LogInformation(new EventId(1, "Inspected"), "Protected payment response inspected; policy PAN-v1 Mask.");
+                changed = WriteSelected(document.RootElement, writer, policy, 0);
+            output = changed ? transformed.ToArray() : captured.ToArray();
+            logger.LogInformation(new EventId(1, "Inspected"), "Protected response inspected; policy {PolicyId} version {Version} Mask.",
+                policy.PolicyId, policy.Version);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
         {
             // Never attach exceptions: parser/transport messages may contain upstream data.
-            logger.LogWarning(new EventId(2, "Blocked"), "Protected payment response blocked; inspection failed.");
+            logger.LogWarning(new EventId(2, "Blocked"), "Protected response blocked; inspection failed.");
             response.Headers.Clear();
             response.StatusCode = StatusCodes.Status502BadGateway;
             response.Headers.CacheControl = "no-store";
@@ -81,28 +82,27 @@ public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger)
         await response.Body.WriteAsync(output, context.CancellationToken);
     }
 
-    private static void WriteRoot(JsonElement root, Utf8JsonWriter writer)
+    private static bool WriteSelected(JsonElement value, Utf8JsonWriter writer, CompiledPanPolicy policy, int segment)
     {
-        if (root.ValueKind != JsonValueKind.Object) { root.WriteTo(writer); return; }
+        if (segment == policy.Segments.Length)
+        {
+            if (value.ValueKind == JsonValueKind.Null) { value.WriteTo(writer); return false; }
+            if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
+            writer.WriteStringValue(Mask(value.GetString()!));
+            return true;
+        }
+        if (value.ValueKind != JsonValueKind.Object) { value.WriteTo(writer); return false; }
+        var changed = false;
         writer.WriteStartObject();
-        foreach (var property in root.EnumerateObject())
+        foreach (var property in value.EnumerateObject())
         {
             writer.WritePropertyName(property.Name);
-            if (property.Name != "payment" || property.Value.ValueKind != JsonValueKind.Object)
-            { property.Value.WriteTo(writer); continue; }
-            writer.WriteStartObject();
-            foreach (var field in property.Value.EnumerateObject())
-            {
-                writer.WritePropertyName(field.Name);
-                if (field.Name != "cardNumber" || field.Value.ValueKind == JsonValueKind.Null)
-                    field.Value.WriteTo(writer);
-                else if (field.Value.ValueKind == JsonValueKind.String)
-                    writer.WriteStringValue(Mask(field.Value.GetString()!));
-                else throw new InspectionException();
-            }
-            writer.WriteEndObject();
+            if (property.Name == policy.Segments[segment])
+                changed |= WriteSelected(property.Value, writer, policy, segment + 1);
+            else property.Value.WriteTo(writer);
         }
         writer.WriteEndObject();
+        return changed;
     }
 
     private static string Mask(string value)

@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using TestApi;
@@ -86,7 +87,7 @@ public sealed class ProxyTests
                 await context.Response.Body.FlushAsync();
             }
         }));
-        if (size > PanResponseTransform.MaxBodyBytes) await AssertBlocked(hosts);
+        if (size > 1048576) await AssertBlocked(hosts);
         else
         {
             var result = await hosts.Client.GetStringAsync("/protected/case");
@@ -304,6 +305,57 @@ public sealed class ProxyTests
             await context.Response.WriteAsync(body);
         });
 
+    [Fact]
+    public async Task Alternative_policy_changes_route_selector_and_real_body_limit()
+    {
+        var policy = PolicyConfiguration.Defaults();
+        policy["PanPolicies:Policies:0:PolicyId"] = "Alternative";
+        policy["PanPolicies:Policies:0:Version"] = "v2";
+        policy["PanPolicies:Policies:0:RouteId"] = "passthrough";
+        policy["PanPolicies:Policies:0:Selector"] = "$.account.details.pan";
+        policy["PanPolicies:Policies:0:MaxBodyBytes"] = "128";
+        const string body = "{\"account\":{\"details\":{\"pan\":\"4111111111111111\"}},\"payment\":{\"cardNumber\":\"untouched\"}}";
+        await using var hosts = await Hosts.Start(app =>
+        {
+            MapBody(app, body);
+            app.MapGet("/large", async context =>
+            {
+                context.Response.ContentType = "application/json";
+                // Undeclared size exercises the actual streamed limit, not only Content-Length.
+                await context.Response.WriteAsync("{\"padding\":\"" + new string('x', 128) + "\"}");
+            });
+        }, policy);
+        Assert.Equal(body, await hosts.Client.GetStringAsync("/protected/case"));
+        Assert.Equal(body.Replace(SyntheticApi.Pan, "************1111"),
+            await hosts.Client.GetStringAsync("/passthrough/case"));
+        using var blocked = await hosts.Client.GetAsync("/passthrough/large");
+        Assert.Equal(HttpStatusCode.BadGateway, blocked.StatusCode);
+        Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", await blocked.Content.ReadAsStringAsync());
+        Assert.Contains(hosts.Logs.Messages, x => x.Contains("Alternative") && x.Contains("v2"));
+        Assert.DoesNotContain(hosts.Logs.Messages, x => x.Contains(SyntheticApi.Pan));
+    }
+
+    [Theory]
+    [InlineData(" { \"Payment\" : {\"cardNumber\": \"4111111111111111\"} } \n")]
+    [InlineData("{\"payment\":[{\"cardNumber\":\"4111111111111111\"}]}")]
+    [InlineData("{\"payment\":false}")]
+    public async Task No_selected_property_preserves_original_bytes(string body)
+    {
+        await using var hosts = await Hosts.Start(app => MapBody(app, body));
+        Assert.Equal(body, await hosts.Client.GetStringAsync("/protected/case"));
+    }
+
+    [Fact]
+    public async Task Alternative_deep_selector_handles_duplicates_in_every_segment()
+    {
+        var policy = PolicyConfiguration.Defaults();
+        policy["PanPolicies:Policies:0:Selector"] = "$.a.b.c";
+        const string body = "{\"a\":{\"b\":{\"c\":\"4111111111111111\",\"c\":null},\"b\":{\"c\":\"4111111111111111\"}},\"a\":{\"b\":{\"c\":\"4111111111111111\"}}}";
+        await using var hosts = await Hosts.Start(app => MapBody(app, body), policy);
+        Assert.Equal(body.Replace(SyntheticApi.Pan, "************1111"),
+            await hosts.Client.GetStringAsync("/protected/case"));
+    }
+
     private static async Task AssertBlocked(Hosts hosts)
     {
         using var response = await hosts.Client.GetAsync("/protected/case");
@@ -320,13 +372,16 @@ public sealed class ProxyTests
         public HttpClient Client { get; } = new(new SocketsHttpHandler { UseProxy = false })
         { BaseAddress = new Uri(Address(gateway)), Timeout = TimeSpan.FromSeconds(15) };
 
-        public static async Task<Hosts> Start(Action<WebApplication>? endpoints = null)
+        public static async Task<Hosts> Start(Action<WebApplication>? endpoints = null,
+            Dictionary<string, string?>? policies = null)
         {
             var api = SyntheticApi.Build([], b => b.WebHost.UseUrls("http://127.0.0.1:0"), endpoints);
             await api.StartAsync();
             var logs = new CaptureLogs();
             var gateway = GatewayHost.Build([], Address(api) + "/", b =>
             {
+                b.Configuration.Sources.Clear();
+                b.Configuration.AddInMemoryCollection(policies ?? PolicyConfiguration.Defaults());
                 b.WebHost.UseUrls("http://127.0.0.1:0");
                 b.Logging.AddProvider(logs);
             });
