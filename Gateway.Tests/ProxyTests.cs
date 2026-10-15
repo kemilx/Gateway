@@ -18,6 +18,104 @@ namespace Gateway.Tests;
 
 public sealed class ProxyTests
 {
+    [Theory]
+    [InlineData(1, 8388608, "success")]
+    [InlineData(2, 1048576, "success")]
+    [InlineData(1, 8388608, "invalid")]
+    [InlineData(1, 8388608, "abort")]
+    [InlineData(1, 8388608, "cancel")]
+    public async Task Budget_saturation_is_immediate_and_capacity_returns(int slots, long bytes, string ending)
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var values = PolicyConfiguration.Defaults();
+        values["PanPolicies:InspectionBudget:MaxConcurrentInspections"] = slots.ToString();
+        values["PanPolicies:InspectionBudget:MaxReservedBodyBytes"] = bytes.ToString();
+        await using var hosts = await Hosts.Start(app =>
+        {
+            app.MapGet("/held", async context =>
+            {
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync("{\"payment\":");
+                await context.Response.Body.FlushAsync();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                if (ending == "abort") { context.Abort(); return; }
+                await context.Response.WriteAsync(ending == "invalid" ? "INVALID}" : "{\"cardNumber\":\"4111111111111111\"}}");
+            });
+            app.MapGet("/no-body-yet", async context =>
+            {
+                context.Response.ContentType = "application/json";
+                context.Response.Headers["X-Sensitive-Upstream"] = SyntheticApi.Pan;
+                context.Response.Headers.ETag = "\"raw\"";
+                await context.Response.StartAsync();
+                await context.Response.Body.FlushAsync();
+                await secondRelease.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            });
+            MapBody(app, "plain", "text/plain");
+            app.MapMethods("/bodyless/{status:int}", ["GET", "HEAD"], context =>
+            {
+                context.Response.ContentType = "application/json";
+                context.Response.StatusCode = int.Parse(context.Request.RouteValues["status"]!.ToString()!);
+                return Task.CompletedTask;
+            });
+        }, values);
+        using var cancellation = new CancellationTokenSource();
+        var first = hosts.Client.GetAsync("/protected/held", cancellation.Token);
+        try
+        {
+            await WaitForBudget(hosts.Budget, 1);
+            Assert.Equal(1048576, hosts.Budget.Snapshot.ReservedBodyBytes);
+            using var second = await hosts.Client.GetAsync("/protected/no-body-yet").WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, second.StatusCode);
+            var body = await second.Content.ReadAsStringAsync();
+            Assert.Equal("{\"code\":\"privacy_capacity_exceeded\"}", body);
+            Assert.Equal(Encoding.UTF8.GetByteCount(body), second.Content.Headers.ContentLength);
+            Assert.Equal("application/json; charset=utf-8", second.Content.Headers.ContentType!.ToString());
+            Assert.True(second.Headers.CacheControl!.NoStore);
+            Assert.False(second.Headers.Contains("X-Sensitive-Upstream"));
+            Assert.Null(second.Headers.ETag);
+            Assert.Equal("plain", await hosts.Client.GetStringAsync("/protected/case"));
+            Assert.Contains(SyntheticApi.Pan, await hosts.Client.GetStringAsync("/passthrough/payment"));
+            foreach (var status in new[] { 200, 204, 304 })
+            {
+                using var request = new HttpRequestMessage(status == 200 ? HttpMethod.Head : HttpMethod.Get,
+                    $"/protected/bodyless/{status}");
+                using var bodyless = await hosts.Client.SendAsync(request);
+                Assert.Equal(status, (int)bodyless.StatusCode);
+                Assert.Empty(await bodyless.Content.ReadAsByteArrayAsync());
+            }
+            Assert.Equal(1, hosts.Budget.Snapshot.ActiveInspections);
+            if (ending == "cancel")
+            {
+                cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+                await WaitForBudget(hosts.Budget, 0);
+            }
+            release.TrySetResult();
+            if (ending != "cancel")
+            {
+                using var result = await first.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.Equal(ending == "success" ? HttpStatusCode.OK : HttpStatusCode.BadGateway, result.StatusCode);
+                Assert.DoesNotContain(SyntheticApi.Pan, await result.Content.ReadAsStringAsync());
+            }
+            await WaitForBudget(hosts.Budget, 0);
+            Assert.Equal(0, hosts.Budget.Snapshot.ReservedBodyBytes);
+            Assert.Contains("************1111", await hosts.Client.GetStringAsync("/protected/payment"));
+            Assert.Contains(hosts.Logs.Messages, x => x == "Protected response blocked; inspection capacity exceeded.");
+        }
+        finally { release.TrySetResult(); secondRelease.TrySetResult(); }
+    }
+
+    private static async Task WaitForBudget(InspectionBudget budget, int active)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (budget.Snapshot.ActiveInspections != active)
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            await Task.Yield();
+        }
+    }
+
     [Fact]
     public async Task Real_yarp_hop_masks_only_selected_field_and_repairs_metadata()
     {
@@ -373,6 +471,7 @@ public sealed class ProxyTests
     private sealed class Hosts(WebApplication api, WebApplication gateway, string upstream, CaptureLogs logs) : IAsyncDisposable
     {
         public string Upstream { get; } = upstream;
+        public InspectionBudget Budget { get; } = gateway.Services.GetRequiredService<InspectionBudget>();
         public CaptureLogs Logs { get; } = logs;
         public HttpClient Client { get; } = new(new SocketsHttpHandler { UseProxy = false })
         { BaseAddress = new Uri(Address(gateway)), Timeout = TimeSpan.FromSeconds(15) };

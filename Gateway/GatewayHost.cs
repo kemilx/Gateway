@@ -35,6 +35,7 @@ public static class GatewayHost
                 binder => binder.ErrorOnUnknownConfiguration = true)
             .ValidateOnStart();
         builder.Services.AddSingleton<PanPolicyCatalog>();
+        builder.Services.AddSingleton<InspectionBudget>();
         builder.Services.AddSingleton<PanResponseTransform>();
         builder.Services.AddReverseProxy()
             .LoadFromMemory(
@@ -60,7 +61,12 @@ public static class GatewayHost
                     context.Services.GetRequiredService<PanResponseTransform>().ApplyAsync(transform, policy));
             });
         var app = builder.Build();
-        try { app.MapReverseProxy(); }
+        try
+        {
+            app.MapReverseProxy();
+            // Freeze the global limits at startup, not on the first inspected response.
+            app.Services.GetRequiredService<InspectionBudget>();
+        }
         catch
         {
             // YARP compiles transforms here and can reject options before StartAsync.

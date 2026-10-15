@@ -32,6 +32,10 @@ El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este 
 ```json
 {
   "PanPolicies": {
+    "InspectionBudget": {
+      "MaxConcurrentInspections": 8,
+      "MaxReservedBodyBytes": 8388608
+    },
     "CoverageContract": {
       "Version": "v1",
       "Required": [
@@ -71,7 +75,7 @@ El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este 
 - Máximo **1.048.576 bytes** de entrada real, inclusive; profundidad JSON máxima 64. JSON inválido, exceso, codificación/charset no admitido, respuesta parcial JSON o fallo de lectura: `502 {"code":"privacy_inspection_failed"}` sin cuerpo original ni excepción pública. No descomprime. La lectura se detiene como máximo tras el byte límite + 1, aunque no haya Content-Length.
 - Un **response transform real de YARP** establece `SuppressResponseBody` antes de leer. Captura acotada, parseo y transformación terminan antes de escribir al cliente; no es middleware que amortigua un stream después de iniciar la respuesta.
 - Se recalcula Content-Length y se eliminan ETag, Last-Modified, digests, firmas y metadatos incompatibles del cuerpo transformado. Se solicita `identity`, se eliminan condiciones de caché y rangos de la solicitud protegida y se marca `Cache-Control: no-store`. HEAD/204/304 no añaden cuerpo; no se implementa revalidación de caché.
-- No hay HTTP body logging. Se deshabilitan logs de framework/YARP que podrían incluir URLs y queries. Solo se emiten dos tipos de evento de inspección/bloqueo, sin cuerpo/PAN ni excepciones; la inspección incluye PolicyId/Version validados. La API sintética no emite logs.
+- No hay HTTP body logging. Se deshabilitan logs de framework/YARP que podrían incluir URLs y queries. Solo se emiten eventos de inspección, fallo de inspección (502) y capacidad excedida (503), todos sin payload/PAN, URL sensible ni excepciones; la inspección incluye PolicyId/Version validados. La API sintética no emite logs.
 
 ## Evidencia automatizada
 
@@ -85,4 +89,23 @@ También están cubiertos **206 JSON** (bloqueo sin cuerpo/metadatos originales)
 
 Sin autenticación/autorización, TLS, aislamiento de red, políticas dinámicas, BD, UI, email/teléfono ni detección universal. Los headers/trailers y cuerpos no JSON no se inspeccionan. No protege canales directos ni logs/dumps del entorno. La máscara revela cuatro dígitos y **no anonimiza**.
 
-El límite es por respuesta de entrada: el DOM y la salida reserializada consumen memoria adicional (incluidos escapes). No hay presupuesto global de concurrencia, pruebas de carga, métricas completas ni endurecimiento operativo. YARP usa un activity timeout de 15 s; cancelaciones del cliente se propagan. Las pruebas cubren la interrupción descrita, pero no certifican presión de memoria, timeouts, todos los escenarios de desconexión o saturación. No activar sobre datos reales ni desplegar sin diseño y revisión adicionales.
+El DOM y la salida reserializada consumen memoria adicional (incluidos escapes). No hay pruebas de carga, métricas completas ni endurecimiento operativo. YARP usa un activity timeout de 15 s; cancelaciones del cliente se propagan. Las pruebas cubren interrupción, cancelación y saturación controlada del presupuesto, pero no certifican presión de memoria, timeouts ni todos los escenarios de desconexión. No activar sobre datos reales ni desplegar sin diseño y revisión adicionales.
+
+## Presupuesto global de inspección
+
+`PanPolicies.InspectionBudget` es obligatorio. Sus valores predeterminados son
+`MaxConcurrentInspections: 8` (rango 1..1024) y `MaxReservedBodyBytes: 8388608`
+(8 MiB; rango 1..1073741824, 1 GiB). Cada `Policy.MaxBodyBytes` debe caber en
+el presupuesto. Los campos desconocidos impiden iniciar.
+
+El presupuesto es compartido por todas las rutas protegidas de **una instancia**,
+sin cola: una respuesta JSON elegible reserva atómicamente un slot y su límite
+completo `MaxBodyBytes`, antes de leer el cuerpo upstream, hasta terminar la escritura
+downstream. Sin capacidad devuelve inmediatamente 503
+`{"code":"privacy_capacity_exceeded"}`, JSON UTF-8 y `no-store`, sin metadatos upstream.
+HEAD, 204, 304, non-JSON y passthrough no reservan capacidad. La reserva se libera
+también ante 502, cancelación o excepción. La configuración se fija al iniciar.
+
+`MaxReservedBodyBytes` reserva **límites de entrada**, no equivale al heap real:
+DOM, buffers, salida y transporte necesitan memoria adicional. No es un límite
+distribuido ni impide que upstream haya producido datos antes del rechazo.

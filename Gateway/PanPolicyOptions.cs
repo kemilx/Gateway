@@ -9,8 +9,15 @@ namespace Gateway;
 public sealed class PanPolicyOptions
 {
     public const string SectionName = "PanPolicies";
+    public InspectionBudgetOptions? InspectionBudget { get; set; }
     public PanCoverageContract? CoverageContract { get; set; }
     public List<PanPolicyDefinition> Policies { get; set; } = [];
+}
+
+public sealed class InspectionBudgetOptions
+{
+    public int MaxConcurrentInspections { get; set; } = 8;
+    public long MaxReservedBodyBytes { get; set; } = 8 * 1024 * 1024;
 }
 
 public sealed class PanCoverageContract
@@ -46,6 +53,12 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
 
     public ValidateOptionsResult Validate(string? name, PanPolicyOptions options)
     {
+        if (options.InspectionBudget is not
+            {
+                MaxConcurrentInspections: >= 1 and <= 1024,
+                MaxReservedBodyBytes: >= 1 and <= 1073741824
+            })
+            return ValidateOptionsResult.Fail("PanPolicies requires an inspection budget: concurrency 1..1024 and bytes 1..1073741824.");
         if (options.Policies is not { Count: > 0 and <= 32 })
             return ValidateOptionsResult.Fail("PanPolicies requires between 1 and 32 policies.");
 
@@ -56,7 +69,8 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
                 || !SafeIdentifier(policy.RouteId) || !knownRouteIds.Contains(policy.RouteId) || !routes.Add(policy.RouteId)
                 || !string.Equals(policy.Mode, "Mask", StringComparison.Ordinal)
                 || !SafeSelector(policy.Selector)
-                || policy.MaxBodyBytes is <= 0 or > MaximumBodyBytes)
+                || policy.MaxBodyBytes is <= 0 or > MaximumBodyBytes
+                || policy.MaxBodyBytes > options.InspectionBudget.MaxReservedBodyBytes)
                 return ValidateOptionsResult.Fail("Invalid PAN policy: check identifiers, unique existing RouteId, exact Mask mode, object selector and body limit.");
         }
 

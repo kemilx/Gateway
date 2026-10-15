@@ -11,6 +11,8 @@ internal static class PolicyConfiguration
 {
     internal static Dictionary<string, string?> Defaults() => new()
     {
+        ["PanPolicies:InspectionBudget:MaxConcurrentInspections"] = "8",
+        ["PanPolicies:InspectionBudget:MaxReservedBodyBytes"] = "8388608",
         ["PanPolicies:CoverageContract:Version"] = "v1",
         ["PanPolicies:CoverageContract:Required:0:RouteId"] = "protected-payment",
         ["PanPolicies:CoverageContract:Required:0:Selector"] = "$.payment.cardNumber",

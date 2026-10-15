@@ -6,9 +6,10 @@ using Yarp.ReverseProxy.Transforms;
 
 namespace Gateway;
 
-public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger)
+public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger, InspectionBudget budget)
 {
     private static readonly byte[] Failure = "{\"code\":\"privacy_inspection_failed\"}"u8.ToArray();
+    private static readonly byte[] CapacityFailure = "{\"code\":\"privacy_capacity_exceeded\"}"u8.ToArray();
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public async ValueTask ApplyAsync(ResponseTransformContext context, CompiledPanPolicy policy)
@@ -28,6 +29,20 @@ public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger)
 
         // YARP has received headers but has not started the downstream response. Prevent its body copy.
         context.SuppressResponseBody = true;
+        context.CancellationToken.ThrowIfCancellationRequested();
+        using var lease = budget.TryAcquire(policy.MaxBodyBytes);
+        if (lease is null)
+        {
+            context.CancellationToken.ThrowIfCancellationRequested();
+            logger.LogWarning(new EventId(3, "CapacityExceeded"), "Protected response blocked; inspection capacity exceeded.");
+            response.Headers.Clear();
+            response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            response.Headers.CacheControl = "no-store";
+            response.ContentType = "application/json; charset=utf-8";
+            response.ContentLength = CapacityFailure.Length;
+            await response.Body.WriteAsync(CapacityFailure, context.CancellationToken);
+            return;
+        }
         byte[] output;
         try
         {
