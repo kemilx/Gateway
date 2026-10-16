@@ -1,0 +1,150 @@
+{
+  "schema": "gateway.mvp05.evidence.v1",
+  "status": "passed",
+  "classification": "MEASURED_NOT_SIZED",
+  "sourceRevision": "21527d26f30ec888746ecd114fff4ba46da8e212",
+  "environment": {
+    "runtime": "10.0.12",
+    "os": "Windows",
+    "processorCount": 12,
+    "serverGc": false,
+    "latencyMode": "Interactive"
+  },
+  "scenario": {
+    "profile": "token-dense-v1",
+    "bodyBytes": 1048576,
+    "maxConcurrentInspections": 8,
+    "maxReservedBodyBytes": 8388608,
+    "httpRequestsPerConcurrency": 64
+  },
+  "memory": [
+    {
+      "concurrency": 1,
+      "outputReadyManagedDeltaBytes": 6376160,
+      "outputReadyPostGcManagedDeltaBytes": 3141816,
+      "writeBlockedManagedDeltaBytes": 3199616,
+      "postReleaseManagedDeltaBytes": 1054960,
+      "outputReadyWorkingSetDeltaBytes": 5828608,
+      "outputReadyPrivateBytesDeltaBytes": 5459968,
+      "outcomes": 1,
+      "durations": 1
+    },
+    {
+      "concurrency": 2,
+      "outputReadyManagedDeltaBytes": 16938488,
+      "outputReadyPostGcManagedDeltaBytes": 10485016,
+      "writeBlockedManagedDeltaBytes": 10551024,
+      "postReleaseManagedDeltaBytes": 5251104,
+      "outputReadyWorkingSetDeltaBytes": 14233600,
+      "outputReadyPrivateBytesDeltaBytes": 15306752,
+      "outcomes": 2,
+      "durations": 2
+    },
+    {
+      "concurrency": 4,
+      "outputReadyManagedDeltaBytes": 27320304,
+      "outputReadyPostGcManagedDeltaBytes": 25171240,
+      "writeBlockedManagedDeltaBytes": 25253680,
+      "postReleaseManagedDeltaBytes": 13643104,
+      "outputReadyWorkingSetDeltaBytes": 25972736,
+      "outputReadyPrivateBytesDeltaBytes": 31313920,
+      "outcomes": 4,
+      "durations": 4
+    },
+    {
+      "concurrency": 8,
+      "outputReadyManagedDeltaBytes": 69575424,
+      "outputReadyPostGcManagedDeltaBytes": 54543784,
+      "writeBlockedManagedDeltaBytes": 54650944,
+      "postReleaseManagedDeltaBytes": 30427336,
+      "outputReadyWorkingSetDeltaBytes": 55721984,
+      "outputReadyPrivateBytesDeltaBytes": 68837376,
+      "outcomes": 9,
+      "durations": 8
+    }
+  ],
+  "saturationAtEight": {
+    "statusCode": 503,
+    "originReads": 0,
+    "budgetUnchanged": true,
+    "releasedToZero": true,
+    "canaryPassed": true
+  },
+  "http": [
+    {
+      "concurrency": 1,
+      "total": 64,
+      "status200": 64,
+      "requestsPerSecond": 24.50,
+      "p50Milliseconds": 23.21,
+      "p95Milliseconds": 87.84,
+      "maxMilliseconds": 108.35,
+      "peakActive": 1,
+      "peakReservedBodyBytes": 1048576,
+      "outcomes": 64,
+      "durations": 64
+    },
+    {
+      "concurrency": 2,
+      "total": 64,
+      "status200": 64,
+      "requestsPerSecond": 30.14,
+      "p50Milliseconds": 65.64,
+      "p95Milliseconds": 85.91,
+      "maxMilliseconds": 94.56,
+      "peakActive": 2,
+      "peakReservedBodyBytes": 2097152,
+      "outcomes": 64,
+      "durations": 64
+    },
+    {
+      "concurrency": 4,
+      "total": 64,
+      "status200": 64,
+      "requestsPerSecond": 70.39,
+      "p50Milliseconds": 53.91,
+      "p95Milliseconds": 70.70,
+      "maxMilliseconds": 74.31,
+      "peakActive": 4,
+      "peakReservedBodyBytes": 4194304,
+      "outcomes": 64,
+      "durations": 64
+    },
+    {
+      "concurrency": 8,
+      "total": 64,
+      "status200": 64,
+      "requestsPerSecond": 138.79,
+      "p50Milliseconds": 52.48,
+      "p95Milliseconds": 80.84,
+      "maxMilliseconds": 85.33,
+      "peakActive": 8,
+      "peakReservedBodyBytes": 8388608,
+      "outcomes": 64,
+      "durations": 64
+    }
+  ],
+  "rawReportSha256": {
+    "memoryJson": "673B586BFDCB5669910DBC7B3E71274766F4BF19FC2257E5B881EF9D03E2612D",
+    "httpJson": "F83D8380DF6E958D2CC635FC03FC02FE94833C33139AD6AA0826C53F11B18163",
+    "buildSanitizedLog": "C0E39FB237362440C36FD50FEE57F7C1AE3CB5A5FE3DB66812075D9F1D639AF0",
+    "testSanitizedLog": "B31265BEE0AD8B86F73B073CE7096C0FB0542108C6A51224885377DED8BEF4DA"
+  },
+  "validation": {
+    "buildExitCode": 0,
+    "buildErrors": 0,
+    "buildWarnings": 0,
+    "testExitCode": 0,
+    "testsPassed": 114,
+    "testsFailed": 0,
+    "testsSkipped": 0
+  },
+  "decision": "No default change. A target process memory limit, required headroom, isolated HTTP process measurements and repeated runs are required before sizing.",
+  "limitations": [
+    "The diagnostic checkpoint intentionally prolongs capture, DOM, transformed stream and output coexistence.",
+    "HTTP API, gateway and client share one process, so HTTP memory is observational rather than gateway-isolated.",
+    "Loopback omits TLS, authentication, remote network behavior, exporters and production clients.",
+    "Forced GC changes runtime state; working set and private bytes need not return to baseline.",
+    "A single local run cannot establish a universal capacity limit or prove a memory leak."
+  ]
+}
