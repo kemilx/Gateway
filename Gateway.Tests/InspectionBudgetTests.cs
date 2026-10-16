@@ -65,8 +65,9 @@ public sealed class InspectionBudgetTests
         for (var cycle = 0; cycle < LifecycleCycles; cycle++)
         {
             using var stream = new ControlledWriteStream();
-            var (transform, context, budget, proxyResponse) = CreateTransform(stream);
+            var (transform, context, budget, proxyResponse, telemetry) = CreateTransform(stream);
             using (proxyResponse)
+            using (telemetry)
             {
                 var pending = transform.ApplyAsync(context, Policy()).AsTask();
 
@@ -89,8 +90,9 @@ public sealed class InspectionBudgetTests
         {
             using var stream = new ControlledWriteStream();
             using var cancellation = new CancellationTokenSource();
-            var (transform, context, budget, proxyResponse) = CreateTransform(stream, cancellation.Token);
+            var (transform, context, budget, proxyResponse, telemetry) = CreateTransform(stream, cancellation.Token);
             using (proxyResponse)
+            using (telemetry)
             {
                 var pending = transform.ApplyAsync(context, Policy()).AsTask();
 
@@ -113,8 +115,9 @@ public sealed class InspectionBudgetTests
         for (var cycle = 0; cycle < LifecycleCycles; cycle++)
         {
             using var stream = new ControlledWriteStream();
-            var (transform, context, budget, proxyResponse) = CreateTransform(stream);
+            var (transform, context, budget, proxyResponse, telemetry) = CreateTransform(stream);
             using (proxyResponse)
+            using (telemetry)
             {
                 var pending = transform.ApplyAsync(context, Policy()).AsTask();
 
@@ -134,7 +137,8 @@ public sealed class InspectionBudgetTests
     }
 
     private static (PanResponseTransform Transform, ResponseTransformContext Context, InspectionBudget Budget,
-        HttpResponseMessage ProxyResponse) CreateTransform(Stream downstream, CancellationToken cancellationToken = default)
+        HttpResponseMessage ProxyResponse, PrivacyTelemetry Telemetry) CreateTransform(Stream downstream,
+        CancellationToken cancellationToken = default)
     {
         var options = new PanPolicyOptions
         {
@@ -145,6 +149,7 @@ public sealed class InspectionBudgetTests
             }
         };
         var budget = new InspectionBudget(Options.Create(options));
+        var telemetry = new PrivacyTelemetry(budget);
         var httpContext = new DefaultHttpContext();
         httpContext.Response.Body = downstream;
         var proxyResponse = new HttpResponseMessage(HttpStatusCode.OK)
@@ -158,8 +163,8 @@ public sealed class InspectionBudgetTests
             HeadersCopied = true,
             CancellationToken = cancellationToken
         };
-        return (new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, budget), context, budget,
-            proxyResponse);
+        return (new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, telemetry), context, budget,
+            proxyResponse, telemetry);
     }
 
     private static CompiledPanPolicy Policy() =>

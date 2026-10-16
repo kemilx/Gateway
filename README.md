@@ -109,3 +109,31 @@ también ante 502, cancelación o excepción. La configuración se fija al inici
 `MaxReservedBodyBytes` reserva **límites de entrada**, no equivale al heap real:
 DOM, buffers, salida y transporte necesitan memoria adicional. No es un límite
 distribuido ni impide que upstream haya producido datos antes del rechazo.
+
+## Contrato técnico de telemetría (MVP-04)
+
+La implementación usa `System.Diagnostics.Metrics` con el `Meter`
+`Gateway.Privacy`, versión `1.0.0`. Este MVP no configura exporter ni backend
+(incluidos Prometheus u OpenTelemetry) y no está desplegado.
+
+| Instrumento | Tipo | Unidad |
+| --- | --- | --- |
+| `gateway.privacy.inspection.outcomes` | `Counter<long>` | `{inspection}` |
+| `gateway.privacy.inspection.duration` | `Histogram<double>` | `ms` |
+| `gateway.privacy.inspection.active` | `ObservableGauge<int>` | `{inspection}` |
+| `gateway.privacy.inspection.reserved_body_bytes` | `ObservableGauge<long>` | `By` |
+
+- Los outcomes son únicamente `inspected`, `blocked`, `capacity_exceeded`,
+  `canceled`, `write_error` y `faulted`. Cada operación JSON protegida que llega
+  al control de capacidad registra un solo outcome terminal. La duración se
+  registra solo si se adquirió el lease y abarca desde esa adquisición hasta la
+  escritura downstream o su fallo.
+- Counter e histograma usan exclusivamente los tags acotados
+  `gateway.route.id`, `gateway.policy.id`, `gateway.policy.version` y
+  `gateway.privacy.outcome`; los gauges no añaden tags. Nunca se incluye cuerpo,
+  PAN, selector, URL/query ni excepción.
+- Los gauges son valores por instancia obtenidos de `InspectionBudget.Snapshot`.
+  HEAD, 204, 304, respuestas no JSON y rutas sin política no emiten outcomes.
+
+Sigue siendo un MVP local con datos exclusivamente sintéticos y no está
+aprobado para producción.

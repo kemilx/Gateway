@@ -36,6 +36,7 @@ public static class GatewayHost
             .ValidateOnStart();
         builder.Services.AddSingleton<PanPolicyCatalog>();
         builder.Services.AddSingleton<InspectionBudget>();
+        builder.Services.AddSingleton<PrivacyTelemetry>();
         builder.Services.AddSingleton<PanResponseTransform>();
         builder.Services.AddReverseProxy()
             .LoadFromMemory(
@@ -66,6 +67,8 @@ public static class GatewayHost
             app.MapReverseProxy();
             // Freeze the global limits at startup, not on the first inspected response.
             app.Services.GetRequiredService<InspectionBudget>();
+            // Create process-lifetime instruments and their budget-backed observable callbacks.
+            app.Services.GetRequiredService<PrivacyTelemetry>();
         }
         catch
         {
