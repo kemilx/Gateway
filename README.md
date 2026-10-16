@@ -89,7 +89,14 @@ También están cubiertos **206 JSON** (bloqueo sin cuerpo/metadatos originales)
 
 Sin autenticación/autorización, TLS, aislamiento de red, políticas dinámicas, BD, UI, email/teléfono ni detección universal. Los headers/trailers y cuerpos no JSON no se inspeccionan. No protege canales directos ni logs/dumps del entorno. La máscara revela cuatro dígitos y **no anonimiza**.
 
-El DOM y la salida reserializada consumen memoria adicional (incluidos escapes). No hay pruebas de carga, métricas completas ni endurecimiento operativo. YARP usa un activity timeout de 15 s; cancelaciones del cliente se propagan. Las pruebas cubren interrupción, cancelación y saturación controlada del presupuesto, pero no certifican presión de memoria, timeouts ni todos los escenarios de desconexión. No activar sobre datos reales ni desplegar sin diseño y revisión adicionales.
+El DOM y la salida reserializada consumen memoria adicional (incluidos escapes). El
+harness local MVP-05 aporta mediciones sintéticas reproducibles, pero no dimensiona
+producción ni sustituye pruebas en infraestructura representativa. Faltan métricas
+operativas exportadas y endurecimiento. YARP usa un activity timeout de 15 s;
+cancelaciones del cliente se propagan. Las pruebas cubren interrupción, cancelación y
+saturación controlada del presupuesto, pero no certifican timeouts ni todos los
+escenarios de desconexión. No activar sobre datos reales ni desplegar sin diseño y
+revisión adicionales.
 
 ## Presupuesto global de inspección
 
@@ -137,3 +144,36 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
 
 Sigue siendo un MVP local con datos exclusivamente sintéticos y no está
 aprobado para producción.
+
+## Carga y memoria local (MVP-05)
+
+`Gateway.LoadHarness` ejecuta dos mediciones separadas sin paquetes nuevos ni
+cambios en los límites predeterminados. Compilar y consultar opciones:
+
+```powershell
+dotnet build Gateway.LoadHarness/Gateway.LoadHarness.csproj -c Release
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll --help
+```
+
+Ejecutar ambos modos y guardar resultados locales ignorados por Git:
+
+```powershell
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll all `
+  --output artifacts/mvp05/run --requests-per-concurrency 16
+```
+
+- `memory` usa workers nuevos para concurrencias 1/2/4/8, un JSON sintético
+  `token-dense-v1` de exactamente 1 MiB, un checkpoint interno antes de abandonar
+  el DOM y una escritura downstream controlada. Registra heap/GC, working set,
+  private bytes y reserva lógica; con ocho inspecciones comprueba además que la
+  novena devuelve 503 sin leer el origen y que toda capacidad se libera.
+- `http` recorre Cliente → YARP → API sintética real en loopback y registra
+  throughput y latencias closed-loop. API, gateway y cliente comparten proceso, de
+  modo que su memoria es observacional y el muestreo puede omitir picos.
+
+Los resultados se clasifican `MEASURED_NOT_SIZED`: sin un límite de memoria por
+instancia y headroom acordado no demuestran que 8 inspecciones/8 MiB sean límites
+universalmente conservadores. Una GC forzada solo se usa en `memory`; que working
+set o private bytes no vuelvan al baseline no prueba por sí solo una fuga. Los
+reportes no incluyen payload, PAN, URL, hostname, usuario, rutas personales ni
+excepciones. Detalles en [`Gateway.LoadHarness/README.md`](Gateway.LoadHarness/README.md).

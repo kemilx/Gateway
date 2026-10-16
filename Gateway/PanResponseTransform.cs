@@ -6,11 +6,27 @@ using Yarp.ReverseProxy.Transforms;
 
 namespace Gateway;
 
-public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger, PrivacyTelemetry telemetry)
+public sealed class PanResponseTransform
 {
     private static readonly byte[] Failure = "{\"code\":\"privacy_inspection_failed\"}"u8.ToArray();
     private static readonly byte[] CapacityFailure = "{\"code\":\"privacy_capacity_exceeded\"}"u8.ToArray();
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private readonly ILogger<PanResponseTransform> logger;
+    private readonly PrivacyTelemetry telemetry;
+    private readonly Func<CancellationToken, ValueTask>? diagnosticCheckpoint;
+
+    public PanResponseTransform(ILogger<PanResponseTransform> logger, PrivacyTelemetry telemetry)
+        : this(logger, telemetry, null)
+    {
+    }
+
+    internal PanResponseTransform(ILogger<PanResponseTransform> logger, PrivacyTelemetry telemetry,
+        Func<CancellationToken, ValueTask>? diagnosticCheckpoint)
+    {
+        this.logger = logger;
+        this.telemetry = telemetry;
+        this.diagnosticCheckpoint = diagnosticCheckpoint;
+    }
 
     public async ValueTask ApplyAsync(ResponseTransformContext context, CompiledPanPolicy policy)
     {
@@ -49,6 +65,7 @@ public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger, P
         {
             byte[] output;
             var completedOutcome = PrivacyInspectionOutcome.Inspected;
+            var diagnosticCheckpointRunning = false;
             try
             {
                 if (content.Headers.ContentEncoding.Count != 0 || response.StatusCode == 206
@@ -81,10 +98,17 @@ public sealed class PanResponseTransform(ILogger<PanResponseTransform> logger, P
                 using (var writer = new Utf8JsonWriter(transformed))
                     changed = WriteSelected(document.RootElement, writer, policy, 0);
                 output = changed ? transformed.ToArray() : captured.ToArray();
+                if (diagnosticCheckpoint is { } checkpoint)
+                {
+                    diagnosticCheckpointRunning = true;
+                    await checkpoint(context.CancellationToken);
+                    diagnosticCheckpointRunning = false;
+                }
                 logger.LogInformation(new EventId(1, "Inspected"), "Protected response inspected; policy {PolicyId} version {Version} Mask.",
                     policy.PolicyId, policy.Version);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
+            catch (Exception ex) when (!diagnosticCheckpointRunning
+                                       && ex is not OperationCanceledException and not OutOfMemoryException)
             {
                 // Never attach exceptions: parser/transport messages may contain upstream data.
                 logger.LogWarning(new EventId(2, "Blocked"), "Protected response blocked; inspection failed.");

@@ -103,6 +103,92 @@ public sealed class PrivacyTelemetryTests
     }
 
     [Fact]
+    public async Task Diagnostic_checkpoint_precedes_downstream_write_and_keeps_lease()
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(maxConcurrent: 1, maxBytes: ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("TelemetryDiagnosticCheckpoint");
+        var checkpointEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var checkpointRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var downstream = new ControlledWriteStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream,
+            diagnosticCheckpoint: async cancellationToken =>
+            {
+                checkpointEntered.TrySetResult();
+                await checkpointRelease.Task.WaitAsync(cancellationToken);
+            });
+
+        var pending = invocation.ApplyAsync();
+        await checkpointEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal((1, (long)ReservedBodyBytes), budget.Snapshot);
+        Assert.False(downstream.WriteStarted.IsCompleted);
+        Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
+
+        checkpointRelease.TrySetResult();
+        await downstream.WriteStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal((1, (long)ReservedBodyBytes), budget.Snapshot);
+
+        downstream.Complete();
+        await pending.WaitAsync(TimeSpan.FromSeconds(5));
+
+        AssertOutcomeAndDuration(metrics, policy, "inspected");
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Fact]
+    public async Task Diagnostic_checkpoint_cancellation_records_canceled_and_releases_lease()
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(maxConcurrent: 1, maxBytes: ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("TelemetryCheckpointCanceled");
+        using var cancellation = new CancellationTokenSource();
+        var checkpointEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var downstream = new ControlledWriteStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream,
+            cancellation.Token, diagnosticCheckpoint: async cancellationToken =>
+            {
+                checkpointEntered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            });
+
+        var pending = invocation.ApplyAsync();
+        await checkpointEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal((1, (long)ReservedBodyBytes), budget.Snapshot);
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.False(downstream.WriteStarted.IsCompleted);
+        AssertOutcomeAndDuration(metrics, policy, "canceled");
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Fact]
+    public async Task Diagnostic_checkpoint_exception_records_faulted_and_releases_lease()
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(maxConcurrent: 1, maxBytes: ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("TelemetryCheckpointFaulted");
+        var failure = new InvalidOperationException("Synthetic diagnostic checkpoint failure.");
+        using var downstream = new ControlledWriteStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream,
+            diagnosticCheckpoint: _ => ValueTask.FromException(failure));
+
+        var actual = await Assert.ThrowsAsync<InvalidOperationException>(() => invocation.ApplyAsync());
+
+        Assert.Same(failure, actual);
+        Assert.False(downstream.WriteStarted.IsCompleted);
+        AssertOutcomeAndDuration(metrics, policy, "faulted");
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Fact]
     public async Task Cancellation_and_downstream_write_failure_record_exact_outcomes()
     {
         using var metrics = new MetricCollector();
@@ -353,7 +439,8 @@ public sealed class PrivacyTelemetryTests
 
     private static TransformInvocation Invocation(PrivacyTelemetry telemetry, CompiledPanPolicy policy,
         HttpContent content, Stream downstream, CancellationToken cancellationToken = default,
-        string method = "GET", HttpStatusCode statusCode = HttpStatusCode.OK)
+        string method = "GET", HttpStatusCode statusCode = HttpStatusCode.OK,
+        Func<CancellationToken, ValueTask>? diagnosticCheckpoint = null)
     {
         var httpContext = new DefaultHttpContext();
         httpContext.Request.Method = method;
@@ -367,9 +454,10 @@ public sealed class PrivacyTelemetryTests
             HeadersCopied = true,
             CancellationToken = cancellationToken
         };
-        return new TransformInvocation(
-            new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, telemetry), policy, context,
-            proxyResponse);
+        var transform = diagnosticCheckpoint is null
+            ? new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, telemetry)
+            : new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, telemetry, diagnosticCheckpoint);
+        return new TransformInvocation(transform, policy, context, proxyResponse);
     }
 
     private sealed class TransformInvocation(PanResponseTransform transform, CompiledPanPolicy policy,
