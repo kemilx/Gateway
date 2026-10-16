@@ -1,0 +1,83 @@
+{
+  "schema": "gateway.mvp08.evidence.v1",
+  "status": "passed",
+  "classification": "HARD_LIMIT_LOCAL_CANDIDATE",
+  "sourceRevision": "7863a373332f70fbfe9025b1619942df69829870",
+  "environment": {
+    "platform": "Windows",
+    "processArchitecture": "64-bit",
+    "mechanism": "windows-job-process-memory"
+  },
+  "scenario": {
+    "profile": "token-dense-v1",
+    "bodyBytes": 1048576,
+    "requestsPerRun": 64,
+    "repetitions": 10,
+    "maxConcurrentInspections": 6,
+    "concurrencies": [1, 2, 4, 6],
+    "targetProcessCommitBytes": 536870912,
+    "requiredHeadroomPercent": 30,
+    "allowedBytes": 375809638,
+    "maxReservedBodyBytes": 8388608
+  },
+  "enforcement": {
+    "jobPerGateway": true,
+    "processMemoryFlag": true,
+    "killOnJobCloseFlag": true,
+    "createdSuspended": true,
+    "assignedAndVerifiedBeforeResume": true,
+    "verifiedAfterLoad": true,
+    "apiExcluded": true,
+    "clientExcluded": true,
+    "allRunsVerified": true,
+    "allRunsCooperativeCleanup": true,
+    "oomProbeRun": false
+  },
+  "functionalValidation": {
+    "runs": 40,
+    "requests": 2560,
+    "status200": 2560,
+    "outcomes": 2560,
+    "durations": 2560,
+    "allBudgetsReleased": true,
+    "allCanariesPassed": true,
+    "allRunsPassed": true
+  },
+  "memory": {
+    "maxSampledPrivateBytes": 329945088,
+    "sampledPrivateMarginBelowAllowedBytes": 45864550,
+    "maxJobPeakProcessCommitBytes": 334942208,
+    "jobCommitMarginBelowAllowedBytes": 40867430,
+    "worstObservedHeadroomPercent": 37.61
+  },
+  "aggregates": [
+    { "concurrency": 1, "runs": 10, "maxPrivateBytes": 160948224, "medianPrivateBytes": 134727680, "maxJobPeakProcessCommitBytes": 161087488, "medianJobPeakProcessCommitBytes": 137443328, "maxManagedBytes": 139056016, "maxWorkingSetBytes": 197685248, "medianRequestsPerSecond": 37.00, "medianP50Milliseconds": 21.01, "medianP95Milliseconds": 59.37 },
+    { "concurrency": 2, "runs": 10, "maxPrivateBytes": 230727680, "medianPrivateBytes": 158574592, "maxJobPeakProcessCommitBytes": 230940672, "medianJobPeakProcessCommitBytes": 160192512, "maxManagedBytes": 191592776, "maxWorkingSetBytes": 261472256, "medianRequestsPerSecond": 53.57, "medianP50Milliseconds": 29.22, "medianP95Milliseconds": 76.34 },
+    { "concurrency": 4, "runs": 10, "maxPrivateBytes": 275824640, "medianPrivateBytes": 219000832, "maxJobPeakProcessCommitBytes": 276049920, "medianJobPeakProcessCommitBytes": 222715904, "maxManagedBytes": 234011912, "maxWorkingSetBytes": 302903296, "medianRequestsPerSecond": 69.60, "medianP50Milliseconds": 55.45, "medianP95Milliseconds": 93.35 },
+    { "concurrency": 6, "runs": 10, "maxPrivateBytes": 329945088, "medianPrivateBytes": 246231040, "maxJobPeakProcessCommitBytes": 334942208, "medianJobPeakProcessCommitBytes": 248907776, "maxManagedBytes": 304296880, "maxWorkingSetBytes": 354066432, "medianRequestsPerSecond": 80.44, "medianP50Milliseconds": 69.90, "medianP95Milliseconds": 111.78 }
+  ],
+  "validation": {
+    "buildExitCode": 0,
+    "buildErrors": 0,
+    "buildWarnings": 0,
+    "testExitCode": 0,
+    "testsPassed": 122,
+    "testsFailed": 0,
+    "testsSkipped": 0,
+    "formatExitCode": 0
+  },
+  "artifactSha256": {
+    "hardLimitJson": "5E95069C1D2243FBF4DE7964C3269810BD378C0C8BC7B2FEE0E23DE109CB5653",
+    "hardLimitMarkdown": "B047013BC251C91A4BCB00E2AA2D33FD982BDC5E2E3E055BE106E0C608734A98",
+    "buildSanitizedLog": "585BDC7C7AA3D73D2488CDFD9788C2BDD07FEB61475B0940CC28B733A8D0A31C",
+    "testSanitizedLog": "7FDFFB7704ED0DE904EAF13235D741B9E5C39A8D0EC4243B4916ECAAF6A2C9E5",
+    "formatSanitizedLog": "7EB70257593DA06F682A3DDDA54A9D260D4FC514F645237F5CA74B08F8DA61A6"
+  },
+  "decision": "Candidate 6 passed the local Windows per-process commit hard-limit experiment with the required headroom. Application defaults remain 8 inspections and 8 MiB; production and default changes require a separate decision and representative sustained validation.",
+  "limitations": [
+    "A Windows Job process-memory limit controls per-process commit, not working set, total Job memory or a container.",
+    "No deliberate allocation-failure probe was executed.",
+    "Abrupt coordinator death between process creation and Job assignment can leave a suspended child outside the Job, without an unlimited execution window.",
+    "The workload is local, synthetic and closed-loop and omits TLS, authentication, remote networking, exporters and production clients."
+  ]
+}
