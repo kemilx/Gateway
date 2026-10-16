@@ -7,22 +7,25 @@ namespace Gateway.LoadHarness;
 
 internal static class IsolatedHarness
 {
-    internal static async Task<bool> Run(string output, int requests, int repetitions, int limitMiB, int headroom, CancellationToken ct)
+    internal static async Task<bool> Run(string output, int requests, int repetitions, int limitMiB, int headroom, int maxConcurrentInspections, CancellationToken ct)
     {
+        Common.Require(maxConcurrentInspections is >= 4 and <= 8);
+        var concurrencies = new[] { 1, 2, 4, maxConcurrentInspections }.Distinct().Order().ToArray();
         var target = limitMiB * 1048576L; var allowed = target * (100 - headroom) / 100;
-        var runs = new List<IsolatedRun>(repetitions * Common.Concurrencies.Length); var complete = false; var stage = "api-start";
+        var runs = new List<IsolatedRun>(repetitions * concurrencies.Length); var complete = false; var stage = "api-start";
         try
         {
             await using var api = new Child("api-worker");
             var upstream = await api.Ready(ct);
             for (var repetition = 1; repetition <= repetitions; repetition++)
-                foreach (var concurrency in Common.Concurrencies)
+                foreach (var concurrency in concurrencies)
                 {
                     var run = new IsolatedRun { Repetition = repetition, Concurrency = concurrency }; runs.Add(run);
                     using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromMinutes(2));
                     var token = deadline.Token;
                     stage = "gateway-start";
-                    await using var gateway = new Child("gateway-worker", "--upstream", upstream);
+                    await using var gateway = new Child("gateway-worker", "--upstream", upstream,
+                        "--max-concurrent-inspections", maxConcurrentInspections.ToString(System.Globalization.CultureInfo.InvariantCulture));
                     var address = await gateway.Ready(token);
                     using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(30) };
                     stage = "warmup";
@@ -62,19 +65,19 @@ internal static class IsolatedHarness
                     run.WithinMemoryLimit = run.Peak.PrivateBytes <= allowed;
                     await gateway.Stop(token);
                     run.Passed = run.Canary && run.BudgetReleased && run.WithinMemoryLimit && run.Outcomes == requests && run.Durations == requests
-                        && run.Peak.Samples > 0 && run.Peak.Active <= concurrency && run.Peak.Reserved <= concurrency * (long)Common.BodySize;
+                        && concurrency <= maxConcurrentInspections && run.Peak.Samples > 0 && run.Peak.Active <= concurrency && run.Peak.Reserved <= concurrency * (long)Common.BodySize;
                 }
             await api.Stop(ct); complete = true;
         }
         catch { Console.Error.WriteLine("Isolated failed at fixed stage: " + stage); }
-        var passed = complete && runs.Count == repetitions * 4 && runs.All(r => r.Passed);
+        var passed = complete && runs.Count == repetitions * concurrencies.Length && concurrencies.All(c => c <= maxConcurrentInspections) && runs.All(r => r.Passed);
         var aggregates = runs.GroupBy(r => r.Concurrency).Select(g => new IsolatedAggregate(g.Key, g.Count(),
             g.Max(r => r.Peak.PrivateBytes), Median(g.Select(r => (double)r.Peak.PrivateBytes)), g.Max(r => r.Peak.ManagedBytes), g.Max(r => r.Peak.WorkingSetBytes),
             Median(g.Select(r => r.RequestsPerSecond)), Median(g.Select(r => r.P50Ms)), Median(g.Select(r => r.P95Ms)), g.Count() == repetitions && g.All(r => r.Passed))).ToArray();
         var report = new IsolatedReport("gateway.mvp06.isolated.v1", passed ? "passed" : "failed", passed ? "SIZED_LOCAL_CANDIDATE" : "SIZING_FAILED",
-            Common.Revision, "token-dense-v1", Common.BodySize, requests, repetitions, target, headroom, allowed, "privateBytes",
+            Common.Revision, "token-dense-v1", Common.BodySize, requests, repetitions, maxConcurrentInspections, concurrencies, target, headroom, allowed, "privateBytes",
             "Separate API, gateway and client processes; fresh gateway per run. Child self-samples each metric every 10ms, including warmup retained memory after reset; no forced GC. No parent sampling. Sampling can miss transients. Closed-loop full-body validation; monotonic nearest-rank p50/p95. Local synthetic evidence only, not a container hard-limit or sustained-load test. Aborted runs may contain partial observations or zero defaults; consult passed. Overall timeout 10 minutes, run 2 minutes, protocol 30 seconds, release 5 seconds.",
-            "Passing means only this local candidate met the selected limit; it does not authorize production or changes to defaults.", runs, aggregates);
+            "Candidate-only: maxConcurrentInspections configures synthetic workers only; Gateway/appsettings defaults remain unchanged. Passing means only this local candidate met the selected limit; it does not authorize production or changes to defaults.", runs, aggregates);
         await Common.Save(output, "isolated", report, Markdown); return passed;
     }
     private static async Task<int> Request(HttpClient client, string path, int? length, CancellationToken ct)
@@ -91,7 +94,7 @@ internal static class IsolatedHarness
     }
     private static string Markdown(IsolatedReport r)
     {
-        var text = new StringBuilder($"# Isolated sizing: {r.Status}\n\n{r.Classification}\n\nSource: {r.SourceRevision}\nProfile: {r.Profile}; body: {r.BodyBytes} bytes; requests/run: {r.RequestsPerConcurrency}; repetitions: {r.Repetitions}.\nTarget: {r.TargetBytes} bytes; headroom: {r.HeadroomPercent}%; allowed: {r.AllowedBytes} bytes; metric: {r.SizingMetric}.\n\n{r.Decision}\n\n{r.Notes}\n\n|Rep|Concurrency|Total|Status counts|Elapsed ms|RPS|p50 ms|p95 ms|max ms|Managed|Working set|Private|Active|Reserved|Outcomes|Durations|Released|Canary|Within limit|Passed|\n|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|\n");
+        var text = new StringBuilder($"# Isolated sizing: {r.Status}\n\n{r.Classification}\n\nCandidato sintético: maxConcurrentInspections={r.MaxConcurrentInspections}; concurrencias: {string.Join("/", r.Concurrencies)}. No cambia Gateway/appsettings.\n\nSource: {r.SourceRevision}\nProfile: {r.Profile}; body: {r.BodyBytes} bytes; requests/run: {r.RequestsPerConcurrency}; repetitions: {r.Repetitions}.\nTarget: {r.TargetBytes} bytes; headroom: {r.HeadroomPercent}%; allowed: {r.AllowedBytes} bytes; metric: {r.SizingMetric}.\n\n{r.Decision}\n\n{r.Notes}\n\n|Rep|Concurrency|Total|Status counts|Elapsed ms|RPS|p50 ms|p95 ms|max ms|Managed|Working set|Private|Active|Reserved|Outcomes|Durations|Released|Canary|Within limit|Passed|\n|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|\n");
         foreach (var s in r.Runs) text.AppendLine($"|{s.Repetition}|{s.Concurrency}|{s.Total}|{string.Join(", ", s.StatusCounts.Select(x => $"{x.Key}:{x.Value}"))}|{s.ElapsedMs:F2}|{s.RequestsPerSecond:F2}|{s.P50Ms:F2}|{s.P95Ms:F2}|{s.MaxMs:F2}|{s.Peak.ManagedBytes}|{s.Peak.WorkingSetBytes}|{s.Peak.PrivateBytes}|{s.Peak.Active}|{s.Peak.Reserved}|{s.Outcomes}|{s.Durations}|{s.BudgetReleased}|{s.Canary}|{s.WithinMemoryLimit}|{s.Passed}|");
         text.AppendLine("\n|Concurrency|Runs|Max private|Median private|Max managed|Max working set|Median RPS|Median p50 ms|Median p95 ms|All passed|\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|");
         foreach (var a in r.Aggregates) text.AppendLine($"|{a.Concurrency}|{a.Runs}|{a.MaxPrivateBytes}|{a.MedianPrivateBytes:F0}|{a.MaxManagedBytes}|{a.MaxWorkingSetBytes}|{a.MedianRps:F2}|{a.MedianP50Ms:F2}|{a.MedianP95Ms:F2}|{a.AllPassed}|");
@@ -179,5 +182,5 @@ internal sealed class IsolatedRun
 internal sealed record IsolatedAggregate(int Concurrency, int Runs, long MaxPrivateBytes, double MedianPrivateBytes, long MaxManagedBytes,
     long MaxWorkingSetBytes, double MedianRps, double MedianP50Ms, double MedianP95Ms, bool AllPassed);
 internal sealed record IsolatedReport(string Schema, string Status, string Classification, string SourceRevision, string Profile, int BodyBytes,
-    int RequestsPerConcurrency, int Repetitions, long TargetBytes, int HeadroomPercent, long AllowedBytes, string SizingMetric,
+    int RequestsPerConcurrency, int Repetitions, int MaxConcurrentInspections, int[] Concurrencies, long TargetBytes, int HeadroomPercent, long AllowedBytes, string SizingMetric,
     string Notes, string Decision, List<IsolatedRun> Runs, IsolatedAggregate[] Aggregates);

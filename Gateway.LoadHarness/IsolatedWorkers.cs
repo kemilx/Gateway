@@ -24,14 +24,14 @@ internal static class IsolatedWorkers
             && uri.Port > 0 && uri.UserInfo == "" && uri.AbsolutePath == "/" && uri.Query == "" && uri.Fragment == "");
         return uri!;
     }
-    private static void Configure(WebApplicationBuilder b)
+    private static void Configure(WebApplicationBuilder b, int maxConcurrentInspections)
     {
         b.Logging.ClearProviders();
         b.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
         b.Configuration.Sources.Clear();
         b.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["PanPolicies:InspectionBudget:MaxConcurrentInspections"] = "8",
+            ["PanPolicies:InspectionBudget:MaxConcurrentInspections"] = maxConcurrentInspections.ToString(CultureInfo.InvariantCulture),
             ["PanPolicies:InspectionBudget:MaxReservedBodyBytes"] = "8388608",
             ["PanPolicies:CoverageContract:Version"] = "v1",
             ["PanPolicies:CoverageContract:Required:0:RouteId"] = "protected-payment",
@@ -45,9 +45,13 @@ internal static class IsolatedWorkers
         });
     }
     private static Task Send(object value) => Console.Out.WriteLineAsync(JsonSerializer.Serialize(value, Wire));
-    internal static async Task Run(string? upstream, CancellationToken ct)
+    internal static async Task Run(string? upstream, int maxConcurrentInspections, CancellationToken ct)
     {
-        if (upstream is not null) Origin(upstream);
+        if (upstream is not null)
+        {
+            Common.Require(maxConcurrentInspections is >= 4 and <= 8);
+            Origin(upstream);
+        }
         var payload = upstream is null ? Common.Payload() : null;
         await using var app = upstream is null
             ? SyntheticApi.Build([], b =>
@@ -60,7 +64,7 @@ internal static class IsolatedWorkers
                 context.Response.ContentType = "application/json"; context.Response.ContentLength = payload!.Length;
                 await context.Response.Body.WriteAsync(payload, context.RequestAborted);
             }))
-            : GatewayHost.Build([], upstream, Configure);
+            : GatewayHost.Build([], upstream, b => Configure(b, maxConcurrentInspections));
         long outcomes = 0, durations = 0, baselineOutcomes = 0, baselineDurations = 0;
         using var listener = new MeterListener();
         listener.InstrumentPublished = (i, l) =>
@@ -71,6 +75,24 @@ internal static class IsolatedWorkers
         listener.SetMeasurementEventCallback<double>((_, _, _, _) => Interlocked.Increment(ref durations));
         listener.Start();
         var budget = upstream is null ? null : app.Services.GetRequiredService<InspectionBudget>();
+        if (budget is not null)
+        {
+            var leases = new List<IDisposable>(maxConcurrentInspections);
+            IDisposable? overflow = null;
+            try
+            {
+                for (var i = 0; i < maxConcurrentInspections; i++)
+                    leases.Add(budget.TryAcquire(1) ?? throw new InvalidOperationException("Harness invariant failed."));
+                overflow = budget.TryAcquire(1);
+                Common.Require(overflow is null);
+            }
+            finally
+            {
+                overflow?.Dispose();
+                foreach (var lease in leases) lease.Dispose();
+            }
+            Common.Require(budget.Snapshot == (0, 0L));
+        }
         var gate = new object(); var peak = new Peak(0, 0, 0, 0, 0);
         void Sample()
         {

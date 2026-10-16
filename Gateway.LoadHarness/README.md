@@ -1,4 +1,4 @@
-# Gateway.LoadHarness — MVP-05 y MVP-06
+# Gateway.LoadHarness — MVP-05, MVP-06 y MVP-07
 
 Harness local y reproducible para medir carga y memoria del gateway con datos
 exclusivamente sintéticos. No es un benchmark de producción, no despliega servicios,
@@ -109,14 +109,14 @@ Private Bytes es `floor(536870912 × 70 / 100)` = **375809638 bytes**. Es un umb
 observacional de aceptación, no un límite aplicado por el SO o un contenedor.
 
 El cliente coordinador, el worker persistente de API sintética y cada gateway están
-en procesos separados. Cada repetición recorre concurrencias 1, 2, 4 y 8 con un
+en procesos separados. Cada repetición recorre por defecto concurrencias 1, 2, 4 y 8 con un
 gateway nuevo. Cada ejecución reutiliza un `HttpClient` sin proxy, calienta con dos
 respuestas enmascaradas consumidas por completo, reinicia métricas sin forzar GC y
 envía la cantidad exacta de solicitudes closed-loop. El cuerpo `token-dense` mide
 exactamente 1 MiB. Toda respuesta medida debe ser 200, conservar longitud, estar
 enmascarada y no contener el PAN sintético. p50/p95 usan nearest-rank; no hay p99.
 
-Los comandos internos `api-worker` y `gateway-worker --upstream <loopback-origin>`
+Los comandos internos `api-worker` (sin opciones) y `gateway-worker --upstream <loopback-origin> --max-concurrent-inspections N`
 reservan stdout para JSON-lines compacto. Las direcciones permanecen solo en memoria.
 El protocolo admite `stop`; gateway exige además un `reset` tras dos warmups y un
 `report` con el conteo esperado. El reporte espera hasta cinco segundos por presupuesto
@@ -137,3 +137,27 @@ diagnósticos de excepciones. `SIZED_LOCAL_CANDIDATE` solo indica que el candida
 sintético local cumplió; no aprueba producción ni cambios de defaults. No representa
 carga sostenida, límite real de contenedor ni capacidad productiva. No hay despliegue,
 cambio de esquema ni rollback de datos.
+
+## MVP-07: concurrencia candidata, solo workers sintéticos
+
+`isolated --max-concurrent-inspections N` acepta un entero decimal estricto entre
+4 y 8, con valor predeterminado 8. Solo configura el presupuesto de inspecciones de
+los workers sintéticos; **no modifica Gateway/appsettings ni defaults productivos**.
+`all` no cambia. La reserva máxima permanece en 8388608 bytes y el cuerpo en 1 MiB;
+el umbral de memoria y el headroom tampoco cambian.
+
+Cada repetición usa el conjunto ordenado sin duplicados `{1,2,4,N}`: N7 ejecuta
+1/2/4/7, N4 ejecuta 1/2/4 y el default N8 conserva 1/2/4/8. Cada run exige además
+concurrencia no superior al candidato, pico activo no superior a su concurrencia y
+reserva no superior a su concurrencia × 1 MiB. Antes de publicar `ready`, cada
+gateway worker adquiere exactamente N leases mínimos, exige que N+1 sea rechazado y
+libera el presupuesto a 0/0; esto verifica conductualmente el límite configurado.
+
+```powershell
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll isolated --output artifacts/mvp05/mvp07-smoke --requests-per-concurrency 8 --repetitions 1 --max-concurrent-inspections 6
+```
+
+JSON añade `maxConcurrentInspections` y `concurrencies` (schedule exacto); Markdown
+muestra ambos. Se conserva `gateway.mvp06.isolated.v1` como extensión compatible.
+Un smoke no acredita sizing sostenido: la decisión sigue siendo candidate-only,
+sin autorización de producción ni cambio de defaults.

@@ -194,3 +194,17 @@ dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll isolated 
 locales cumplieron ese umbral observacional. No es un límite de contenedor, no
 autoriza producción y no cambia los defaults. El muestreo de 10 ms puede omitir
 transitorios; loopback omite TLS, autenticación, red remota y exporters.
+
+MVP-07 permite evaluar de forma explícita un candidato entre 4 y 8 inspecciones
+sin modificar `Gateway/appsettings.json`. Por ejemplo, para probar seis
+inspecciones con cinco repeticiones:
+
+```powershell
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll isolated `
+  --output artifacts/mvp05/mvp07-candidate6 --repetitions 5 `
+  --max-concurrent-inspections 6
+```
+
+El calendario resultante es 1/2/4/6; omitir la opción conserva 1/2/4/8. Incluso
+si el candidato pasa localmente, cambiar el default requiere una decisión separada,
+reversible y nueva evidencia bajo un límite real de memoria.

@@ -46,7 +46,8 @@ public sealed class IsolatedHarnessTests
         Environment.SetEnvironmentVariable(key, "https://0.0.0.0:0");
         try
         {
-            await VerifyRun(limitMiB: 512, headroom: 30, allowed: 375809638, expectedPass: true);
+            await VerifyRun(limitMiB: 1024, headroom: 1, allowed: 1063004405, candidate: 8,
+                expectedSchedule: [1, 2, 4, 8], expectedPass: true);
         }
         finally
         {
@@ -56,9 +57,41 @@ public sealed class IsolatedHarnessTests
 
     [Fact]
     public Task Isolated_run_fails_sizing_when_selected_limit_is_too_small() =>
-        VerifyRun(limitMiB: 64, headroom: 90, allowed: 6710886, expectedPass: false);
+        VerifyRun(limitMiB: 64, headroom: 90, allowed: 6710886, candidate: 8,
+            expectedSchedule: [1, 2, 4, 8], expectedPass: false);
 
-    private static async Task VerifyRun(int limitMiB, int headroom, long allowed, bool expectedPass)
+    [Fact]
+    public Task Isolated_run_with_candidate_seven_uses_1_2_4_7_and_preserves_budget_invariants() =>
+        VerifyRun(limitMiB: 1024, headroom: 1, allowed: 1063004405, candidate: 7,
+            expectedSchedule: [1, 2, 4, 7], expectedPass: true);
+
+    [Fact]
+    public Task Isolated_run_with_candidate_four_deduplicates_schedule_and_preserves_budget_invariants() =>
+        VerifyRun(limitMiB: 1024, headroom: 1, allowed: 1063004405, candidate: 4,
+            expectedSchedule: [1, 2, 4], expectedPass: true);
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(9)]
+    public async Task Isolated_run_rejects_out_of_range_candidate_before_workers_and_without_report(int candidate)
+    {
+        var output = Path.Combine(Path.GetTempPath(), "gateway-isolated-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var run = IsolatedHarness.Run(output, 8, 1, 512, 30, candidate, CancellationToken.None);
+            // Validation must fault before the first asynchronous worker startup/readiness wait.
+            Assert.True(run.IsFaulted);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => run);
+            Assert.False(Directory.Exists(output));
+        }
+        finally
+        {
+            if (Directory.Exists(output)) Directory.Delete(output, recursive: true);
+        }
+    }
+
+    private static async Task VerifyRun(int limitMiB, int headroom, long allowed, int candidate,
+        int[] expectedSchedule, bool expectedPass)
     {
         var output = Path.Combine(Path.GetTempPath(), "gateway-isolated-tests", Guid.NewGuid().ToString("N"));
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
@@ -74,7 +107,7 @@ public sealed class IsolatedHarnessTests
         listener.Start();
         try
         {
-            var passed = await IsolatedHarness.Run(output, 8, 1, limitMiB, headroom, deadline.Token);
+            var passed = await IsolatedHarness.Run(output, 8, 1, limitMiB, headroom, candidate, deadline.Token);
             Assert.Equal(expectedPass, passed);
             Assert.Equal(0L, Interlocked.Read(ref parentMeasurements));
             var json = await File.ReadAllTextAsync(Path.Combine(output, "isolated.json"), deadline.Token);
@@ -94,9 +127,19 @@ public sealed class IsolatedHarnessTests
             Assert.Equal("privateBytes", report.GetProperty("sizingMetric").GetString());
             Assert.Equal(8, report.GetProperty("requestsPerConcurrency").GetInt32());
             Assert.Equal(1, report.GetProperty("repetitions").GetInt32());
+            Assert.Equal(candidate, report.GetProperty("maxConcurrentInspections").GetInt32());
+            Assert.Equal(expectedSchedule, report.GetProperty("concurrencies").EnumerateArray().Select(c => c.GetInt32()));
+            var decision = report.GetProperty("decision").GetString()!;
+            Assert.Contains("Gateway/appsettings defaults remain unchanged", decision);
+            Assert.Contains("does not authorize production or changes to defaults", decision);
+            Assert.Contains(decision, markdown);
             Assert.Equal(1048576, report.GetProperty("bodyBytes").GetInt32());
             var runs = report.GetProperty("runs").EnumerateArray().ToArray();
-            Assert.Equal(new[] { 1, 2, 4, 8 }, runs.Select(r => r.GetProperty("concurrency").GetInt32()));
+            Assert.Equal(expectedSchedule, runs.Select(r => r.GetProperty("concurrency").GetInt32()));
+            var expectedTotal = 8 * expectedSchedule.Length;
+            Assert.Equal(expectedTotal, runs.Sum(r => r.GetProperty("total").GetInt32()));
+            Assert.Equal(expectedTotal, runs.Sum(r => r.GetProperty("outcomes").GetInt64()));
+            Assert.Equal(expectedTotal, runs.Sum(r => r.GetProperty("durations").GetInt64()));
             foreach (var run in runs)
             {
                 var concurrency = run.GetProperty("concurrency").GetInt32();
@@ -123,7 +166,7 @@ public sealed class IsolatedHarnessTests
                 Assert.InRange(peak.GetProperty("reserved").GetInt64(), 0L, concurrency * 1048576L);
             }
             var aggregates = report.GetProperty("aggregates").EnumerateArray().ToArray();
-            Assert.Equal(new[] { 1, 2, 4, 8 }, aggregates.Select(a => a.GetProperty("concurrency").GetInt32()));
+            Assert.Equal(expectedSchedule, aggregates.Select(a => a.GetProperty("concurrency").GetInt32()));
             foreach (var aggregate in aggregates)
             {
                 Assert.Equal(1, aggregate.GetProperty("runs").GetInt32());
