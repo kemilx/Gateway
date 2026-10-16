@@ -1,4 +1,4 @@
-# Gateway.LoadHarness — MVP-05
+# Gateway.LoadHarness — MVP-05 y MVP-06
 
 Harness local y reproducible para medir carga y memoria del gateway con datos
 exclusivamente sintéticos. No es un benchmark de producción, no despliega servicios,
@@ -90,3 +90,50 @@ carga representativas, varias repeticiones y criterios operativos acordados.
 Los JSON y Markdown no guardan payload, PAN, selector, URL, hostname, usuario, rutas
 personales ni textos de excepción. Solo contienen identificadores fijos del perfil,
 revisión compilada, runtime/SO genérico y valores de medición.
+## MVP-06: sizing local aislado
+
+```powershell
+dotnet build Gateway.LoadHarness/Gateway.LoadHarness.csproj -c Release --no-restore
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll isolated --output artifacts/mvp05/mvp06-smoke --requests-per-concurrency 8 --repetitions 1
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll isolated --output artifacts/mvp05/mvp06-local
+```
+
+`isolated` es independiente de `all`; los comandos existentes y los defaults de la
+aplicación no cambian. Las opciones usan enteros decimales estrictos e invariantes:
+64 solicitudes por ejecución (8..100000), tres repeticiones (1..10), 512 MiB
+(64..65536) y 30% de headroom (1..90). El output conserva la validación local bajo
+`artifacts/mvp05`.
+
+Candidato elegido: 512 MiB por gateway con 30% de headroom. El máximo efectivo de
+Private Bytes es `floor(536870912 × 70 / 100)` = **375809638 bytes**. Es un umbral
+observacional de aceptación, no un límite aplicado por el SO o un contenedor.
+
+El cliente coordinador, el worker persistente de API sintética y cada gateway están
+en procesos separados. Cada repetición recorre concurrencias 1, 2, 4 y 8 con un
+gateway nuevo. Cada ejecución reutiliza un `HttpClient` sin proxy, calienta con dos
+respuestas enmascaradas consumidas por completo, reinicia métricas sin forzar GC y
+envía la cantidad exacta de solicitudes closed-loop. El cuerpo `token-dense` mide
+exactamente 1 MiB. Toda respuesta medida debe ser 200, conservar longitud, estar
+enmascarada y no contener el PAN sintético. p50/p95 usan nearest-rank; no hay p99.
+
+Los comandos internos `api-worker` y `gateway-worker --upstream <loopback-origin>`
+reservan stdout para JSON-lines compacto. Las direcciones permanecen solo en memoria.
+El protocolo admite `stop`; gateway exige además un `reset` tras dos warmups y un
+`report` con el conteo esperado. El reporte espera hasta cinco segundos por presupuesto
+0/0 y telemetría suficiente, y luego exige outcomes/duraciones exactos. stderr se drena
+sin reportarlo. El cleanup acotado mata el árbol si no puede cerrar: timeout global de
+diez minutos, dos minutos por run y treinta segundos por comando.
+
+El gateway se automuestrea cada 10 ms y conserva máximos independientes de managed
+memory, working set, Private Bytes, inspecciones activas y bytes reservados. No hay
+muestreo del padre ni GC forzada. La memoria retenida del warmup permanece incluida y
+los picos más breves pueden no observarse. Los agregados por concurrencia incluyen
+máximo/mediana de Private Bytes, máximos managed/working set y medianas de throughput,
+p50 y p95. Deben pasar todas las repeticiones; un run abortado falla explícitamente.
+
+`isolated.json` (`gateway.mvp06.isolated.v1`) y `isolated.md`, derivado del mismo
+modelo, se guardan atómicamente. Omiten direcciones, PID, payloads, selectores y
+diagnósticos de excepciones. `SIZED_LOCAL_CANDIDATE` solo indica que el candidato
+sintético local cumplió; no aprueba producción ni cambios de defaults. No representa
+carga sostenida, límite real de contenedor ni capacidad productiva. No hay despliegue,
+cambio de esquema ni rollback de datos.

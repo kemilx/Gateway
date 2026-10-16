@@ -177,3 +177,20 @@ universalmente conservadores. Una GC forzada solo se usa en `memory`; que workin
 set o private bytes no vuelvan al baseline no prueba por sí solo una fuga. Los
 reportes no incluyen payload, PAN, URL, hostname, usuario, rutas personales ni
 excepciones. Detalles en [`Gateway.LoadHarness/README.md`](Gateway.LoadHarness/README.md).
+
+### Sizing local aislado (MVP-06)
+
+El objetivo seleccionado es 512 MiB por proceso gateway con 30% de headroom:
+Private Bytes debe permanecer en o por debajo de 375.809.638 bytes. `isolated`
+separa API, gateway y cliente en procesos distintos, crea un gateway nuevo para
+cada concurrencia 1/2/4/8 y ejecuta tres repeticiones por defecto:
+
+```powershell
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll isolated `
+  --output artifacts/mvp05/mvp06-local
+```
+
+`SIZED_LOCAL_CANDIDATE` significa únicamente que todas las repeticiones sintéticas
+locales cumplieron ese umbral observacional. No es un límite de contenedor, no
+autoriza producción y no cambia los defaults. El muestreo de 10 ms puede omitir
+transitorios; loopback omite TLS, autenticación, red remota y exporters.
