@@ -13,6 +13,7 @@ internal static class Program
         {
             if (args is ["--help"])
             {
+                Console.WriteLine("hard-limit --output <artifacts/mvp05/directory> [--requests-per-concurrency N] [--repetitions N] [--memory-limit-mib N] [--headroom-percent N] [--max-concurrent-inspections N]\nWindows only, opt-in enforced process commit limit. Defaults: 64, 3, 512, 30, 6; same ranges as isolated. API/client excluded.");
                 Console.WriteLine("isolated --output <artifacts/mvp05/directory> [--requests-per-concurrency N] [--repetitions N] [--memory-limit-mib N] [--headroom-percent N] [--max-concurrent-inspections N]\nValores por defecto/rangos: requests 64/8..100000; repetitions 3/1..10; memory MiB 512/64..65536; headroom percent 30/1..90; max-concurrent-inspections 8/4..8 (entero estricto). Solo configura workers sintéticos; no cambia Gateway/appsettings.\napi-worker (interno, sin opciones)\ngateway-worker --upstream <loopback-origin> --max-concurrent-inspections N (interno; 4..8)");
                 Console.WriteLine("Local synthetic harness only; NOT for production.\nmemory --output <artifacts/mvp05/directory>\nhttp|all --output <artifacts/mvp05/directory> [--requests-per-concurrency N] (8..100000, default 16)\nmemory-worker --concurrency N (internal; N=1,2,4,8)\nOutput must remain under the local artifacts/mvp05 directory.\nMemory: fresh workers, MEASURED_NOT_SIZED. HTTP: shared-process observational memory.");
                 return 0;
@@ -36,8 +37,12 @@ internal static class Program
                 await IsolatedWorkers.Run(command == "api-worker" ? null : options["--upstream"], candidate, timeout.Token);
                 return 0;
             }
-            if (command == "isolated")
+            if (command is "isolated" or "hard-limit")
             {
+                if (command == "hard-limit" && (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess))
+                {
+                    Console.Error.WriteLine("Hard-limit requires 64-bit Windows. No processes or reports created."); return 1;
+                }
                 Common.Require(options.Keys.All(k => k is "--output" or "--requests-per-concurrency" or "--repetitions" or "--memory-limit-mib" or "--headroom-percent" or "--max-concurrent-inspections"));
                 Common.Require(options.TryGetValue("--output", out var isolatedOutput));
                 int Option(string key, int fallback, int min, int max)
@@ -48,7 +53,7 @@ internal static class Program
                 return await IsolatedHarness.Run(Common.OutputDirectory(isolatedOutput!),
                     Option("--requests-per-concurrency", 64, 8, 100000), Option("--repetitions", 3, 1, 10),
                     Option("--memory-limit-mib", 512, 64, 65536), Option("--headroom-percent", 30, 1, 90),
-                    Option("--max-concurrent-inspections", 8, 4, 8), timeout.Token) ? 0 : 1;
+                    Option("--max-concurrent-inspections", command == "hard-limit" ? 6 : 8, 4, 8), timeout.Token, command == "hard-limit") ? 0 : 1;
             }
             Common.Require(command is "memory" or "http" or "all");
             Common.Require(options.TryGetValue("--output", out var outputValue) && !string.IsNullOrWhiteSpace(outputValue));

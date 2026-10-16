@@ -1,4 +1,4 @@
-# Gateway.LoadHarness — MVP-05, MVP-06 y MVP-07
+# Gateway.LoadHarness — MVP-05, MVP-06, MVP-07 y MVP-08
 
 Harness local y reproducible para medir carga y memoria del gateway con datos
 exclusivamente sintéticos. No es un benchmark de producción, no despliega servicios,
@@ -161,3 +161,81 @@ JSON añade `maxConcurrentInspections` y `concurrencies` (schedule exacto); Mark
 muestra ambos. Se conserva `gateway.mvp06.isolated.v1` como extensión compatible.
 Un smoke no acredita sizing sostenido: la decisión sigue siendo candidate-only,
 sin autorización de producción ni cambio de defaults.
+
+## MVP-08: hard-limit Windows, opt-in
+
+```powershell
+dotnet build Gateway.LoadHarness/Gateway.LoadHarness.csproj -c Release --no-restore
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll hard-limit --output artifacts/mvp05/mvp08-smoke --requests-per-concurrency 8 --repetitions 1 --max-concurrent-inspections 6
+```
+
+Comando separado, solo Windows 10/11 de 64 bits y .NET 10. En otras plataformas devuelve un fallo fijo
+antes de crear procesos o reportes. Defaults: 64 requests por concurrencia, tres
+repeticiones, 512 MiB, 30% de headroom y **candidato 6**. Rangos estrictos iguales a
+`isolated`: 8..100000, 1..10, 64..65536, 1..90 y candidato 4..8. Schedule ordenado
+sin duplicados `{1,2,4,N}`. `isolated` conserva default 8, schedule 1/2/4/8, schema
+`gateway.mvp06.isolated.v1` y semántica observacional; no adquiere un Job.
+
+### Launcher y aislamiento
+
+`WindowsJobProcess` crea un Job Object **anónimo y no heredable por cada gateway**,
+configurado antes del lanzamiento con `JOB_OBJECT_LIMIT_PROCESS_MEMORY` y
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. `ProcessMemoryLimit` contiene exactamente el
+target en bytes. No impone límite al API ni al cliente: la rama con Job solo admite
+`gateway-worker`; el API usa el launcher normal y nunca se asigna a ese Job.
+
+Se usa `CreateProcessW`, sin shell, con aplicación absoluta, argumentos quoteados
+según las reglas CRT, `CREATE_SUSPENDED`, `CREATE_NO_WINDOW` y
+`EXTENDED_STARTUPINFO_PRESENT`. `STARTUPINFOEX` y
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` permiten heredar **solo los tres extremos child
+de stdin/stdout/stderr**. Los extremos parent pierden `HANDLE_FLAG_INHERIT`; el Job
+nunca lo tiene. No hay fallback a herencia indiscriminada ni a `Process.Start`
+para el gateway hard-limit. Las APIs nativas declaran `SetLastError`; los errores
+no se convierten en mensajes del SO, rutas o argumentos públicos.
+
+Después de asignar el proceso suspendido se consulta
+`JOBOBJECT_EXTENDED_LIMIT_INFORMATION` y `IsProcessInJob` para ese Job concreto.
+Solo se llama a `ResumeThread` si límite, ambos flags y membership coinciden. Un
+fallo manejado termina el child incluso si aún no fue asignado; SafeHandles y disposal
+idempotente liberan pipes, hilo, proceso, lista de atributos y Job. Los handles de
+proceso y Job sobreviven a la carga y al stop. Se vuelve a consultar después de la
+carga y se conserva el mayor `PeakProcessMemoryUsed`, incluida una consulta final
+tras la salida cooperativa. `TerminateJobObject`/kill-on-close son recuperación de
+cleanup, **nunca evidencia de PASS**. No se prueba OOM deliberadamente.
+
+Una terminación abrupta del coordinador exactamente entre `CreateProcessW` y
+`AssignProcessToJobObject` podría dejar un child suspendido fuera del Job. No existe
+ventana de ejecución sin límite, pero sí una limitación local de cleanup; eliminarla
+requeriría asociación atómica mediante `PROC_THREAD_ATTRIBUTE_JOB_LIST`.
+
+### Reportes y aceptación
+
+`hard-limit.json` y `hard-limit.md` se guardan por reemplazo atómico individual,
+también tras fallo de escenario si el destino sigue siendo escribible. El schema
+separado es `gateway.mvp08.hard-limit.v1`; clasificación
+`HARD_LIMIT_LOCAL_CANDIDATE` o `HARD_LIMIT_FAILED`. Conserva las métricas de carga,
+schedule, perfil, revisión compilada y agregados. Incluye `apiExcluded=true` y
+`clientExcluded=true` por construcción, sin enumerar identidades.
+
+Cada run añade un objeto cerrado `enforcement`: mecanismo fijo
+`windows-job-process-memory`, requested/queried bytes antes/después, asignación
+antes de resume, membership, flags, verificaciones, pico de commit y cleanup.
+Valores desconocidos son `null` y no pasan. `cleanup=true` solo significa stop por
+protocolo, salida cero, drenaje completo y disposal completado; no basta con matar
+el proceso. Un lanzamiento fallido tiene cleanup no cooperativo (`false`). Los
+campos heredados de métricas pueden conservar observaciones parciales/defaults
+tras aborto: nunca se consideran válidos sin `passed=true`.
+
+PASS exige todas las invariantes de `isolated`, verificaciones exactas antes y
+después y cierre cooperativo de gateway y API. **Tanto Private Bytes muestreado
+como el pico de commit del Job deben ser <= allowed**. Con los defaults, target
+536870912 y allowed 375809638 bytes: exceder headroom falla aunque no se alcance
+512 MiB. El pico del Job incluye startup, warmup, carga y shutdown; el sampler de
+10 ms puede omitir transitorios. No hay GC forzada.
+
+El límite es **commit por proceso**, no working set, suma del Job ni límite de
+contenedor. Superarlo puede hacer fallar una asignación sin matar el proceso.
+Un smoke no acredita sizing sostenido ni producción. No modifica defaults,
+infraestructura, esquemas de datos ni permisos; no hay publicación ni despliegue.
+Los reportes y stderr públicos no incorporan PID, nombres de Job, rutas,
+argumentos, direcciones, payloads ni mensajes de excepción.

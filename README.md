@@ -208,3 +208,18 @@ dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll isolated 
 El calendario resultante es 1/2/4/6; omitir la opción conserva 1/2/4/8. Incluso
 si el candidato pasa localmente, cambiar el default requiere una decisión separada,
 reversible y nueva evidencia bajo un límite real de memoria.
+
+En Windows de 64 bits, MVP-08 añade una validación opt-in con Job Object y límite
+real de commit por proceso. Solo los gateways sintéticos entran al Job; API y
+cliente quedan fuera:
+
+```powershell
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll hard-limit `
+  --output artifacts/mvp05/mvp08-local --max-concurrent-inspections 6
+```
+
+El gateway se crea suspendido, se asigna a un Job de 512 MiB y se reanuda únicamente
+tras verificar límite, flags y pertenencia. `HARD_LIMIT_LOCAL_CANDIDATE` exige además
+que Private Bytes y el pico de commit permanezcan bajo 375.809.638 bytes. Sigue
+siendo evidencia local: el Job limita commit por proceso, no equivale a un límite
+de contenedor ni autoriza cambiar defaults o desplegar.

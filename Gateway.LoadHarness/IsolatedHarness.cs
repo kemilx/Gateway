@@ -7,8 +7,9 @@ namespace Gateway.LoadHarness;
 
 internal static class IsolatedHarness
 {
-    internal static async Task<bool> Run(string output, int requests, int repetitions, int limitMiB, int headroom, int maxConcurrentInspections, CancellationToken ct)
+    internal static async Task<bool> Run(string output, int requests, int repetitions, int limitMiB, int headroom, int maxConcurrentInspections, CancellationToken ct, bool hardLimit = false)
     {
+        Common.Require(!hardLimit || OperatingSystem.IsWindows() && Environment.Is64BitProcess);
         Common.Require(maxConcurrentInspections is >= 4 and <= 8);
         var concurrencies = new[] { 1, 2, 4, maxConcurrentInspections }.Distinct().Order().ToArray();
         var target = limitMiB * 1048576L; var allowed = target * (100 - headroom) / 100;
@@ -20,11 +21,12 @@ internal static class IsolatedHarness
             for (var repetition = 1; repetition <= repetitions; repetition++)
                 foreach (var concurrency in concurrencies)
                 {
-                    var run = new IsolatedRun { Repetition = repetition, Concurrency = concurrency }; runs.Add(run);
+                    IsolatedRun run = hardLimit ? new HardLimitRun(target) : new IsolatedRun();
+                    run.Repetition = repetition; run.Concurrency = concurrency; runs.Add(run);
                     using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromMinutes(2));
                     var token = deadline.Token;
                     stage = "gateway-start";
-                    await using var gateway = new Child("gateway-worker", "--upstream", upstream,
+                    await using var gateway = new Child((run as HardLimitRun)?.Enforcement, "gateway-worker", "--upstream", upstream,
                         "--max-concurrent-inspections", maxConcurrentInspections.ToString(System.Globalization.CultureInfo.InvariantCulture));
                     var address = await gateway.Ready(token);
                     using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(30) };
@@ -63,17 +65,35 @@ internal static class IsolatedHarness
                     run.Peak = metrics.Peak; run.Outcomes = metrics.Outcomes; run.Durations = metrics.Durations;
                     run.BudgetReleased = metrics.BudgetReleased; run.Canary = run.Total == requests;
                     run.WithinMemoryLimit = run.Peak.PrivateBytes <= allowed;
+                    gateway.VerifyAfter();
                     await gateway.Stop(token);
                     run.Passed = run.Canary && run.BudgetReleased && run.WithinMemoryLimit && run.Outcomes == requests && run.Durations == requests
                         && concurrency <= maxConcurrentInspections && run.Peak.Samples > 0 && run.Peak.Active <= concurrency && run.Peak.Reserved <= concurrency * (long)Common.BodySize;
                 }
             await api.Stop(ct); complete = true;
         }
-        catch { Console.Error.WriteLine("Isolated failed at fixed stage: " + stage); }
+        catch
+        {
+            if (hardLimit) complete = false;
+            Console.Error.WriteLine((hardLimit ? "Hard-limit" : "Isolated") + " failed at fixed stage: " + stage);
+        }
+        if (hardLimit)
+            foreach (var run in runs.Cast<HardLimitRun>())
+            {
+                run.WithinMemoryLimit &= run.Enforcement.PeakProcessCommitBytes is >= 0 && run.Enforcement.PeakProcessCommitBytes <= allowed;
+                run.Passed &= run.WithinMemoryLimit && run.Enforcement.Passes(allowed);
+            }
         var passed = complete && runs.Count == repetitions * concurrencies.Length && concurrencies.All(c => c <= maxConcurrentInspections) && runs.All(r => r.Passed);
         var aggregates = runs.GroupBy(r => r.Concurrency).Select(g => new IsolatedAggregate(g.Key, g.Count(),
             g.Max(r => r.Peak.PrivateBytes), Median(g.Select(r => (double)r.Peak.PrivateBytes)), g.Max(r => r.Peak.ManagedBytes), g.Max(r => r.Peak.WorkingSetBytes),
             Median(g.Select(r => r.RequestsPerSecond)), Median(g.Select(r => r.P50Ms)), Median(g.Select(r => r.P95Ms)), g.Count() == repetitions && g.All(r => r.Passed))).ToArray();
+        if (hardLimit)
+        {
+            var hardReport = new HardLimitReport("gateway.mvp08.hard-limit.v1", passed ? "passed" : "failed", passed ? "HARD_LIMIT_LOCAL_CANDIDATE" : "HARD_LIMIT_FAILED",
+                Common.Revision, "token-dense-v1", Common.BodySize, requests, repetitions, maxConcurrentInspections, concurrencies, target, headroom, allowed,
+                true, true, HardLimitReport.Explanation, runs.Cast<HardLimitRun>().ToList(), aggregates);
+            await Common.Save(output, "hard-limit", hardReport, HardLimitReport.Markdown); return passed;
+        }
         var report = new IsolatedReport("gateway.mvp06.isolated.v1", passed ? "passed" : "failed", passed ? "SIZED_LOCAL_CANDIDATE" : "SIZING_FAILED",
             Common.Revision, "token-dense-v1", Common.BodySize, requests, repetitions, maxConcurrentInspections, concurrencies, target, headroom, allowed, "privateBytes",
             "Separate API, gateway and client processes; fresh gateway per run. Child self-samples each metric every 10ms, including warmup retained memory after reset; no forced GC. No parent sampling. Sampling can miss transients. Closed-loop full-body validation; monotonic nearest-rank p50/p95. Local synthetic evidence only, not a container hard-limit or sustained-load test. Aborted runs may contain partial observations or zero defaults; consult passed. Overall timeout 10 minutes, run 2 minutes, protocol 30 seconds, release 5 seconds.",
@@ -102,21 +122,42 @@ internal static class IsolatedHarness
     }
     private sealed class Child : IAsyncDisposable
     {
-        private readonly Process process;
+        private readonly Process? process;
+        private readonly WindowsJobProcess? jobProcess;
+        private readonly Enforcement? enforcement;
         private readonly Task drain;
         private bool stopped;
-        internal Child(params string[] args)
+        private bool disposed;
+        private StreamReader StandardOutput => jobProcess?.StandardOutput ?? process!.StandardOutput;
+        private StreamReader StandardError => jobProcess?.StandardError ?? process!.StandardError;
+        private StreamWriter StandardInput => jobProcess?.StandardInput ?? process!.StandardInput;
+        private bool HasExited => jobProcess?.HasExited ?? process!.HasExited;
+        private int ExitCode => jobProcess?.ExitCode ?? process!.ExitCode;
+        private Task WaitForExit(CancellationToken ct) => jobProcess?.WaitForExitAsync(ct) ?? process!.WaitForExitAsync(ct);
+        private void KillTree() { if (jobProcess is not null) jobProcess.KillTree(); else process!.Kill(true); }
+        internal void VerifyAfter() { if (enforcement is not null) jobProcess!.Snapshot(enforcement, before: false); }
+        internal Child(params string[] args) : this(null, args) { }
+        internal Child(Enforcement? enforcement, params string[] args)
         {
-            var start = new ProcessStartInfo("dotnet") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
-            start.ArgumentList.Add(typeof(IsolatedHarness).Assembly.Location);
-            foreach (var arg in args) start.ArgumentList.Add(arg);
-            process = Process.Start(start) ?? throw new InvalidOperationException();
+            this.enforcement = enforcement;
+            if (enforcement is not null)
+            {
+                Common.Require(args.FirstOrDefault() == "gateway-worker");
+                jobProcess = WindowsJobProcess.Start(enforcement.RequestedBytes, enforcement, args);
+            }
+            else
+            {
+                var start = new ProcessStartInfo("dotnet") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+                start.ArgumentList.Add(typeof(IsolatedHarness).Assembly.Location);
+                foreach (var arg in args) start.ArgumentList.Add(arg);
+                process = Process.Start(start) ?? throw new InvalidOperationException();
+            }
             drain = Drain();
         }
         private async Task Drain()
         {
             var buffer = new char[1024];
-            while (await process.StandardError.ReadAsync(buffer) != 0) { }
+            while (await StandardError.ReadAsync(buffer) != 0) { }
         }
         internal async Task<string> Ready(CancellationToken ct)
         {
@@ -126,7 +167,10 @@ internal static class IsolatedHarness
         private async Task<JsonElement> Read(string kind, CancellationToken ct)
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
-            var line = await process.StandardOutput.ReadLineAsync(deadline.Token);
+            // Anonymous Win32 pipes are synchronous handles. Bound the await as well as
+            // passing cancellation: an in-flight native read may only unblock on cleanup.
+            var read = StandardOutput.ReadLineAsync(deadline.Token);
+            var line = jobProcess is null ? await read : await read.AsTask().WaitAsync(deadline.Token);
             Common.Require(line is not null && line.Length <= 16384);
             using var document = JsonDocument.Parse(line!);
             Common.Require(document.RootElement.GetProperty("kind").GetString() == kind);
@@ -135,32 +179,46 @@ internal static class IsolatedHarness
         internal async Task<JsonElement> Command(string command, string kind, CancellationToken ct)
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
-            await process.StandardInput.WriteLineAsync(command.AsMemory(), deadline.Token);
-            await process.StandardInput.FlushAsync(deadline.Token); return await Read(kind, deadline.Token);
+            var write = StandardInput.WriteLineAsync(command.AsMemory(), deadline.Token);
+            if (jobProcess is null) await write; else await write.WaitAsync(deadline.Token);
+            var flush = StandardInput.FlushAsync(deadline.Token);
+            if (jobProcess is null) await flush; else await flush.WaitAsync(deadline.Token);
+            return await Read(kind, deadline.Token);
         }
         internal async Task Stop(CancellationToken ct)
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(15));
-            await Command("stop", "stopped", deadline.Token); await process.WaitForExitAsync(deadline.Token);
-            await drain.WaitAsync(deadline.Token); Common.Require(process.ExitCode == 0); stopped = true;
+            await Command("stop", "stopped", deadline.Token); await WaitForExit(deadline.Token);
+            await drain.WaitAsync(deadline.Token); Common.Require(ExitCode == 0); stopped = true;
         }
         public async ValueTask DisposeAsync()
         {
+            if (disposed) return;
+            disposed = true;
+            if (enforcement is not null) enforcement.Cleanup = false;
             try
             {
-                if (!stopped && !process.HasExited)
+                if (enforcement is { VerificationAfter: null })
+                {
+                    // Preserve post-load observations on aborted runs too, without skipping cleanup.
+                    try { VerifyAfter(); }
+                    catch { enforcement.VerificationAfter = false; }
+                }
+                if (!stopped && !HasExited)
                 {
                     try { using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3)); await Stop(deadline.Token); }
-                    catch { if (!process.HasExited) process.Kill(true); }
+                    catch { if (!HasExited) KillTree(); }
                 }
                 using var exit = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                await process.WaitForExitAsync(exit.Token); await drain.WaitAsync(exit.Token);
+                await WaitForExit(exit.Token); await drain.WaitAsync(exit.Token);
+                if (enforcement is not null) jobProcess!.FinalPeak(enforcement);
             }
-            finally { process.Dispose(); }
+            finally { process?.Dispose(); jobProcess?.Dispose(); }
+            if (enforcement is not null) enforcement.Cleanup = stopped;
         }
     }
 }
-internal sealed class IsolatedRun
+internal class IsolatedRun
 {
     public int Repetition { get; set; }
     public int Concurrency { get; set; }

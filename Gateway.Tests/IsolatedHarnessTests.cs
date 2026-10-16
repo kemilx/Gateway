@@ -90,6 +90,106 @@ public sealed class IsolatedHarnessTests
         }
     }
 
+    [Fact]
+    public async Task Hard_limit_run_enforces_real_job_and_reports_exact_candidate_invariants_or_rejects_unsupported_platform()
+    {
+        const long target = 536870912;
+        const long allowed = 531502202;
+        int[] schedule = [1, 2, 4, 6];
+        var output = Path.Combine(Path.GetTempPath(), "gateway-isolated-tests", Guid.NewGuid().ToString("N"));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        try
+        {
+            var pending = IsolatedHarness.Run(output, 8, 1, 512, 1, 6, deadline.Token, hardLimit: true);
+            if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
+            {
+                // Platform validation must precede the first asynchronous startup wait.
+                Assert.True(pending.IsFaulted);
+                await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+                Assert.False(Directory.Exists(output));
+                return;
+            }
+
+            Assert.True(await pending);
+            var json = await File.ReadAllTextAsync(Path.Combine(output, "hard-limit.json"), deadline.Token);
+            var markdown = await File.ReadAllTextAsync(Path.Combine(output, "hard-limit.md"), deadline.Token);
+            AssertReportSafe(json);
+            AssertReportSafe(markdown);
+            foreach (var text in new[] { json, markdown })
+            {
+                Assert.False(Regex.IsMatch(text, @"(?i)\b(pid|processId|threadId)\b"), "Report contains a process identifier field.");
+                Assert.False(Regex.IsMatch(text, @"[A-Za-z]:[\\/]|\\\\|/(?:tmp|home|Users)/"), "Report contains a filesystem path.");
+                Assert.False(text.Contains(output, StringComparison.OrdinalIgnoreCase), "Report contains its output path.");
+            }
+            using var document = JsonDocument.Parse(json);
+            var report = document.RootElement;
+            Assert.Equal("gateway.mvp08.hard-limit.v1", report.GetProperty("schema").GetString());
+            Assert.Equal("passed", report.GetProperty("status").GetString());
+            Assert.Equal("HARD_LIMIT_LOCAL_CANDIDATE", report.GetProperty("classification").GetString());
+            Assert.Equal(target, report.GetProperty("targetBytes").GetInt64());
+            Assert.Equal(allowed, report.GetProperty("allowedBytes").GetInt64());
+            Assert.Equal(1, report.GetProperty("headroomPercent").GetInt32());
+            Assert.Equal(8, report.GetProperty("requestsPerConcurrency").GetInt32());
+            Assert.Equal(1, report.GetProperty("repetitions").GetInt32());
+            Assert.Equal(6, report.GetProperty("maxConcurrentInspections").GetInt32());
+            Assert.Equal(1048576, report.GetProperty("bodyBytes").GetInt32());
+            Assert.True(report.GetProperty("apiExcluded").GetBoolean());
+            Assert.True(report.GetProperty("clientExcluded").GetBoolean());
+            Assert.Equal(schedule, report.GetProperty("concurrencies").EnumerateArray().Select(c => c.GetInt32()));
+            Assert.Contains("HARD_LIMIT_LOCAL_CANDIDATE", markdown);
+            Assert.Contains("Candidate: 6; schedule: 1/2/4/6.", markdown);
+            Assert.Contains("API excluded: True; client excluded: True.", markdown);
+            Assert.Contains("Target: 536870912; headroom: 1%; allowed: 531502202 bytes.", markdown);
+            var runs = report.GetProperty("runs").EnumerateArray().ToArray();
+            Assert.Equal(4, runs.Length);
+            Assert.Equal(schedule, runs.Select(r => r.GetProperty("concurrency").GetInt32()));
+            Assert.Equal(32, runs.Sum(r => r.GetProperty("total").GetInt32()));
+            Assert.Equal(32L, runs.Sum(r => r.GetProperty("outcomes").GetInt64()));
+            Assert.Equal(32L, runs.Sum(r => r.GetProperty("durations").GetInt64()));
+            foreach (var run in runs)
+            {
+                var concurrency = run.GetProperty("concurrency").GetInt32();
+                Assert.Equal(1, run.GetProperty("repetition").GetInt32());
+                Assert.Equal(8, run.GetProperty("total").GetInt32());
+                Assert.Equal(8L, run.GetProperty("outcomes").GetInt64());
+                Assert.Equal(8L, run.GetProperty("durations").GetInt64());
+                var status = Assert.Single(run.GetProperty("statusCounts").EnumerateObject());
+                Assert.Equal("200", status.Name);
+                Assert.Equal(8, status.Value.GetInt32());
+                foreach (var field in new[] { "budgetReleased", "canary", "withinMemoryLimit", "passed" })
+                    Assert.True(run.GetProperty(field).GetBoolean(), field);
+                var peak = run.GetProperty("peak");
+                Assert.True(peak.GetProperty("samples").GetInt32() > 0);
+                Assert.InRange(peak.GetProperty("privateBytes").GetInt64(), 1L, allowed);
+                Assert.InRange(peak.GetProperty("active").GetInt32(), 0, concurrency);
+                Assert.InRange(peak.GetProperty("reserved").GetInt64(), 0L, concurrency * 1048576L);
+                var enforcement = run.GetProperty("enforcement");
+                Assert.Equal("windows-job-process-memory", enforcement.GetProperty("mechanism").GetString());
+                foreach (var field in new[] { "requestedBytes", "queriedBytesBefore", "queriedBytesAfter" })
+                    Assert.Equal(target, enforcement.GetProperty(field).GetInt64());
+                foreach (var field in new[] { "assignedBeforeResume", "membershipBefore", "membershipAfter",
+                    "processMemoryFlagBefore", "processMemoryFlagAfter", "killOnCloseFlagBefore", "killOnCloseFlagAfter",
+                    "verificationBefore", "verificationAfter", "cleanup" })
+                    Assert.True(enforcement.GetProperty(field).GetBoolean(), field);
+                var commit = enforcement.GetProperty("peakProcessCommitBytes").GetInt64();
+                Assert.InRange(commit, 1L, allowed);
+                Assert.Contains($"|1|{concurrency}|536870912|536870912/536870912|True|True/True|True/True|True/True|{commit}|True/True|True|", markdown);
+            }
+            var aggregates = report.GetProperty("aggregates").EnumerateArray().ToArray();
+            Assert.Equal(schedule, aggregates.Select(a => a.GetProperty("concurrency").GetInt32()));
+            foreach (var aggregate in aggregates)
+            {
+                Assert.Equal(1, aggregate.GetProperty("runs").GetInt32());
+                Assert.True(aggregate.GetProperty("allPassed").GetBoolean());
+            }
+            Assert.Equal(2, Directory.GetFiles(output).Length);
+        }
+        finally
+        {
+            if (Directory.Exists(output)) Directory.Delete(output, recursive: true);
+        }
+    }
+
     private static async Task VerifyRun(int limitMiB, int headroom, long allowed, int candidate,
         int[] expectedSchedule, bool expectedPass)
     {
