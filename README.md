@@ -33,8 +33,8 @@ El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este 
 {
   "PanPolicies": {
     "InspectionBudget": {
-      "MaxConcurrentInspections": 8,
-      "MaxReservedBodyBytes": 8388608
+      "MaxConcurrentInspections": 6,
+      "MaxReservedBodyBytes": 6291456
     },
     "CoverageContract": {
       "Version": "v1",
@@ -101,8 +101,8 @@ revisión adicionales.
 ## Presupuesto global de inspección
 
 `PanPolicies.InspectionBudget` es obligatorio. Sus valores predeterminados son
-`MaxConcurrentInspections: 8` (rango 1..1024) y `MaxReservedBodyBytes: 8388608`
-(8 MiB; rango 1..1073741824, 1 GiB). Cada `Policy.MaxBodyBytes` debe caber en
+`MaxConcurrentInspections: 6` (rango 1..1024) y `MaxReservedBodyBytes: 6291456`
+(6 MiB; rango 1..1073741824, 1 GiB). Cada `Policy.MaxBodyBytes` debe caber en
 el presupuesto. Los campos desconocidos impiden iniciar.
 
 El presupuesto es compartido por todas las rutas protegidas de **una instancia**,
@@ -222,4 +222,9 @@ El gateway se crea suspendido, se asigna a un Job de 512 MiB y se reanuda única
 tras verificar límite, flags y pertenencia. `HARD_LIMIT_LOCAL_CANDIDATE` exige además
 que Private Bytes y el pico de commit permanezcan bajo 375.809.638 bytes. Sigue
 siendo evidencia local: el Job limita commit por proceso, no equivale a un límite
-de contenedor ni autoriza cambiar defaults o desplegar.
+de contenedor ni autoriza por sí sola cambiar defaults o desplegar.
+
+MVP-08.1 adopta de forma reversible N6/6291456 (6 MiB) como default local a
+partir de `HARD_LIMIT_LOCAL_CANDIDATE`; esta decisión no autoriza producción.
+Las secciones MVP-05/06/07/08 anteriores conservan la historia de medición: su
+evidencia, por sí sola, no cambió los defaults.

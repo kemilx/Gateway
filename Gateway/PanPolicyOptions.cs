@@ -16,8 +16,8 @@ public sealed class PanPolicyOptions
 
 public sealed class InspectionBudgetOptions
 {
-    public int MaxConcurrentInspections { get; set; } = 8;
-    public long MaxReservedBodyBytes { get; set; } = 8 * 1024 * 1024;
+    public int MaxConcurrentInspections { get; set; } = 6;
+    public long MaxReservedBodyBytes { get; set; } = 6 * 1024 * 1024;
 }
 
 public sealed class PanCoverageContract

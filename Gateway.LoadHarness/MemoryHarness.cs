@@ -18,7 +18,15 @@ internal static class MemoryHarness
     internal static async Task<WorkerReport> Worker(int concurrency, CancellationToken ct)
     {
         var payload = Common.Payload();
-        var budget = new InspectionBudget(Options.Create(new PanPolicyOptions { InspectionBudget = new() }));
+        // Preserve the N8/8 MiB profile used to reproduce the historical MVP-05 measurements.
+        var budget = new InspectionBudget(Options.Create(new PanPolicyOptions
+        {
+            InspectionBudget = new()
+            {
+                MaxConcurrentInspections = 8,
+                MaxReservedBodyBytes = 8388608
+            }
+        }));
         using var telemetry = new PrivacyTelemetry(budget);
         var checkpoint = new Barrier(concurrency); var writes = new Barrier(concurrency);
         var transform = new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, telemetry, checkpoint.Arrive);

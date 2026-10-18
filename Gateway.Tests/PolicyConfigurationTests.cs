@@ -11,8 +11,8 @@ internal static class PolicyConfiguration
 {
     internal static Dictionary<string, string?> Defaults() => new()
     {
-        ["PanPolicies:InspectionBudget:MaxConcurrentInspections"] = "8",
-        ["PanPolicies:InspectionBudget:MaxReservedBodyBytes"] = "8388608",
+        ["PanPolicies:InspectionBudget:MaxConcurrentInspections"] = "6",
+        ["PanPolicies:InspectionBudget:MaxReservedBodyBytes"] = "6291456",
         ["PanPolicies:CoverageContract:Version"] = "v1",
         ["PanPolicies:CoverageContract:Required:0:RouteId"] = "protected-payment",
         ["PanPolicies:CoverageContract:Required:0:Selector"] = "$.payment.cardNumber",
@@ -181,6 +181,9 @@ public sealed class PolicyConfigurationTests
         });
         await app.StartAsync();
         var options = app.Services.GetRequiredService<IOptions<PanPolicyOptions>>().Value;
+        var budget = Assert.IsType<InspectionBudgetOptions>(options.InspectionBudget);
+        Assert.Equal(6, budget.MaxConcurrentInspections);
+        Assert.Equal(6291456, budget.MaxReservedBodyBytes);
         var contract = Assert.IsType<PanCoverageContract>(options.CoverageContract);
         Assert.Equal("v1", contract.Version);
         var requirement = Assert.Single(contract.Required);

@@ -17,6 +17,15 @@ public sealed class InspectionBudgetTests
     private const int ReservedBodyBytes = 1048576;
     private const string JsonBody = "{\"payment\":{\"cardNumber\":\"4111111111111111\"}}";
 
+    [Fact]
+    public void Inspection_budget_CLR_defaults_match_approved_local_budget()
+    {
+        var options = new InspectionBudgetOptions();
+
+        Assert.Equal(6, options.MaxConcurrentInspections);
+        Assert.Equal(6L * 1024 * 1024, options.MaxReservedBodyBytes);
+    }
+
     [Theory]
     [InlineData("missing", "")]
     [InlineData("MaxConcurrentInspections", "0")]
