@@ -33,6 +33,7 @@ El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este 
 {
   "PanPolicies": {
     "InspectionBudget": {
+      "InspectionTimeoutSeconds": 10,
       "MaxConcurrentInspections": 6,
       "MaxReservedBodyBytes": 6291456
     },
@@ -131,10 +132,10 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
 | `gateway.privacy.inspection.reserved_body_bytes` | `ObservableGauge<long>` | `By` |
 
 - Los outcomes son únicamente `inspected`, `blocked`, `capacity_exceeded`,
-  `canceled`, `write_error` y `faulted`. Cada operación JSON protegida que llega
+  `canceled`, `write_error`, `faulted` y `timed_out`. Cada operación JSON protegida que llega
   al control de capacidad registra un solo outcome terminal. La duración se
-  registra solo si se adquirió el lease y abarca desde esa adquisición hasta la
-  escritura downstream o su fallo.
+  registra solo si se adquirió el lease; usa el timestamp conservador previo al
+  intento de adquisición e incluye escritura downstream y cleanup (véase MVP-09).
 - Counter e histograma usan exclusivamente los tags acotados
   `gateway.route.id`, `gateway.policy.id`, `gateway.policy.version` y
   `gateway.privacy.outcome`; los gauges no añaden tags. Nunca se incluye cuerpo,
@@ -228,3 +229,56 @@ MVP-08.1 adopta de forma reversible N6/6291456 (6 MiB) como default local a
 partir de `HARD_LIMIT_LOCAL_CANDIDATE`; esta decisión no autoriza producción.
 Las secciones MVP-05/06/07/08 anteriores conservan la historia de medición: su
 evidencia, por sí sola, no cambió los defaults.
+# MVP-09: deadline cooperativo de inspección
+
+`PanPolicies:InspectionBudget:InspectionTimeoutSeconds` es un entero de **1 a 120**,
+con default **10** tanto CLR como distribuido. Se congela con el presupuesto al
+startup: cambiar configuración exige reiniciar. Se inyecta `TimeProvider` BCL
+(`TimeProvider.System` en producción); el tiempo transcurrido es monotónico.
+
+El timestamp se captura inmediatamente **antes** de intentar adquirir el lease:
+es una aproximación conservadora que incluye desplanificación/espera del lock de
+adquisición, no una marca atómica exacta del lease. No se renueva después ni se
+invoca el reloj inyectable dentro del lock del presupuesto. El deadline incluye lectura, transformación,
+checkpoint diagnóstico, escritura y cleanup. No cubre la espera por headers
+upstream, respuestas excluidas ni el 503 de capacidad sin lease. Al vencer se
+cancela el token ligado y se solicita `HttpContext.Abort()`: **no hay 504 ni
+respuesta de reemplazo**, tampoco si `HasStarted` es false. Errores inducidos por
+el aborto no producen un fallback 502. La cancelación del cliente anterior al
+aborto propio conserva `canceled`; el aborto propio produce `timed_out` (nuevo
+valor al final del enum y nuevo label del instrumento existente). Se registra un
+solo outcome y una duración, al terminar el trabajo, sin tags adicionales.
+
+Todos los IO iniciados se esperan directamente: el timer no libera capacidad ni
+completa métricas. Un Stream no cooperativo puede retener el slot indefinidamente;
+abortar HTTP no garantiza su terminación. Parser, UTF-8 y copias síncronas no son
+preemptibles: se comprueba cancelación/deadline alrededor de esas operaciones y
+durante traversal. Si el timeout ocurre durante escritura puede haber una
+respuesta enmascarada parcial; nunca se reenvía el cuerpo original protegido.
+
+La transición de cancelación protege solo estado bajo lock. `CancelAsync` solicita
+cancelación sin esperar los callbacks y se solicita `Abort` fuera de ese lock,
+sin depender de que esos callbacks retornen. El cleanup asíncrono espera timer,
+registros, callbacks de cancelación (observando sus fallos) y el retorno de Abort
+antes de disponer el token, emitir métricas o liberar el lease; la duración incluye
+ese cleanup. Se aplica también a la cancelación del cliente. Una implementación
+arbitraria de `Abort` o sus callbacks de `RequestAborted` puede bloquear o fallar:
+se garantiza la solicitud, no su retorno ni la terminación física del transporte.
+Un callback puede consultar el estado o iniciar `DisposeAsync`, pero esperar
+sincrónicamente su finalización desde el mismo callback crea una dependencia
+circular inevitable: el cleanup debe esperar que dicho callback termine.
+
+Despliegue/migración: no hay schema ni dependencias nuevas. Actualizar primero
+consumidores de métricas que enumeren outcomes para aceptar `timed_out`; desplegar
+binario/configuración juntos y reiniciar. La clave puede omitirse y toma 10 s.
+Para rollback al commit base `392149839b6fa42c929e5447e306acaaa80065f0`, restaurar
+también la configuración anterior (el binder rechaza claves desconocidas),
+reiniciar y conservar compatibilidad histórica del label en dashboards. No se
+ha ejecutado despliegue ni rollback. El perfil sintético de memoria N8 conserva
+8 slots/8 MiB y fija 120 s para aislar sus barreras/GC del default operativo;
+sus schemas y evidencia histórica no cambian.
+
+Las pruebas lógicas de deadline usan `TimeProvider`/`ITimer` manuales y señales,
+sin sleeps. `Kestrel_one_second_read_stall_aborts_transport_without_response_body`
+es un smoke local separado por trait `Category=TransportSmoke`: usa 1 s real y
+solo comprueba aborto/transporte, no un umbral de latencia estrecho.

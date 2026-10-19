@@ -10,10 +10,12 @@ public sealed class InspectionBudget
     private readonly long maxBytes;
     private int active;
     private long reserved;
+    public TimeSpan InspectionTimeout { get; }
 
     public InspectionBudget(IOptions<PanPolicyOptions> options)
     {
         var limits = options.Value.InspectionBudget!;
+        InspectionTimeout = TimeSpan.FromSeconds(limits.InspectionTimeoutSeconds);
         maxConcurrent = limits.MaxConcurrentInspections;
         maxBytes = limits.MaxReservedBodyBytes;
     }

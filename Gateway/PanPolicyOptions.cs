@@ -16,6 +16,7 @@ public sealed class PanPolicyOptions
 
 public sealed class InspectionBudgetOptions
 {
+    public int InspectionTimeoutSeconds { get; set; } = 10;
     public int MaxConcurrentInspections { get; set; } = 6;
     public long MaxReservedBodyBytes { get; set; } = 6 * 1024 * 1024;
 }
@@ -56,6 +57,7 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
         if (options.InspectionBudget is not
             {
                 MaxConcurrentInspections: >= 1 and <= 1024,
+                InspectionTimeoutSeconds: >= 1 and <= 120,
                 MaxReservedBodyBytes: >= 1 and <= 1073741824
             })
             return ValidateOptionsResult.Fail("PanPolicies requires an inspection budget: concurrency 1..1024 and bytes 1..1073741824.");

@@ -13,18 +13,23 @@ public sealed class PanResponseTransform
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly ILogger<PanResponseTransform> logger;
     private readonly PrivacyTelemetry telemetry;
+    private readonly TimeProvider clock;
+
+    public PanResponseTransform(ILogger<PanResponseTransform> logger, PrivacyTelemetry telemetry, TimeProvider clock)
+        : this(logger, telemetry, null, clock) { }
     private readonly Func<CancellationToken, ValueTask>? diagnosticCheckpoint;
 
     public PanResponseTransform(ILogger<PanResponseTransform> logger, PrivacyTelemetry telemetry)
-        : this(logger, telemetry, null)
+        : this(logger, telemetry, null, TimeProvider.System)
     {
     }
 
     internal PanResponseTransform(ILogger<PanResponseTransform> logger, PrivacyTelemetry telemetry,
-        Func<CancellationToken, ValueTask>? diagnosticCheckpoint)
+        Func<CancellationToken, ValueTask>? diagnosticCheckpoint, TimeProvider? clock = null)
     {
         this.logger = logger;
         this.telemetry = telemetry;
+        this.clock = clock ?? TimeProvider.System;
         this.diagnosticCheckpoint = diagnosticCheckpoint;
     }
 
@@ -46,7 +51,7 @@ public sealed class PanResponseTransform
         // YARP has received headers but has not started the downstream response. Prevent its body copy.
         context.SuppressResponseBody = true;
         context.CancellationToken.ThrowIfCancellationRequested();
-        using var inspection = telemetry.TryStartInspection(policy);
+        using var inspection = telemetry.TryStartInspection(policy, clock);
         if (inspection is null)
         {
             context.CancellationToken.ThrowIfCancellationRequested();
@@ -60,6 +65,7 @@ public sealed class PanResponseTransform
             return;
         }
 
+        await using var deadline = new InspectionDeadline(clock, inspection.StartedAt, telemetry.InspectionTimeout, context.HttpContext, context.CancellationToken);
         var writeStarted = false;
         try
         {
@@ -68,20 +74,23 @@ public sealed class PanResponseTransform
             var diagnosticCheckpointRunning = false;
             try
             {
+                deadline.Check();
                 if (content.Headers.ContentEncoding.Count != 0 || response.StatusCode == 206
                     || (media.CharSet is not null && !string.Equals(media.CharSet.Trim('"'), "utf-8", StringComparison.OrdinalIgnoreCase))
                     || content.Headers.ContentLength > policy.MaxBodyBytes)
                     throw new InspectionException();
 
-                await using var source = await content.ReadAsStreamAsync(context.CancellationToken);
+                await using var source = await content.ReadAsStreamAsync(deadline.Token);
                 using var captured = new MemoryStream();
                 var buffer = ArrayPool<byte>.Shared.Rent(16 * 1024);
                 try
                 {
                     while (true)
                     {
+                        deadline.Check();
                         var count = await source.ReadAsync(buffer.AsMemory(0,
-                            (int)Math.Min(buffer.Length, policy.MaxBodyBytes + 1L - captured.Length)), context.CancellationToken);
+                            (int)Math.Min(buffer.Length, policy.MaxBodyBytes + 1L - captured.Length)), deadline.Token);
+                        deadline.Check();
                         if (count == 0) break;
                         if (captured.Length + count > policy.MaxBodyBytes) throw new InspectionException();
                         captured.Write(buffer, 0, count);
@@ -90,18 +99,24 @@ public sealed class PanResponseTransform
                 finally { ArrayPool<byte>.Shared.Return(buffer, clearArray: true); }
 
                 // JsonDocument can retain invalid UTF-8 inside unvisited strings; validate all input bytes.
+                deadline.Check();
                 StrictUtf8.GetCharCount(captured.GetBuffer().AsSpan(0, (int)captured.Length));
+                deadline.Check();
                 using var document = JsonDocument.Parse(captured.GetBuffer().AsMemory(0, (int)captured.Length),
                     new JsonDocumentOptions { MaxDepth = 64 });
                 using var transformed = new MemoryStream();
+                deadline.Check();
                 bool changed;
                 using (var writer = new Utf8JsonWriter(transformed))
-                    changed = WriteSelected(document.RootElement, writer, policy, 0);
+                    changed = WriteSelected(document.RootElement, writer, policy, 0, deadline);
+                deadline.Check();
                 output = changed ? transformed.ToArray() : captured.ToArray();
+                deadline.Check();
                 if (diagnosticCheckpoint is { } checkpoint)
                 {
                     diagnosticCheckpointRunning = true;
-                    await checkpoint(context.CancellationToken);
+                    await checkpoint(deadline.Token);
+                    deadline.Check();
                     diagnosticCheckpointRunning = false;
                 }
                 logger.LogInformation(new EventId(1, "Inspected"), "Protected response inspected; policy {PolicyId} version {Version} Mask.",
@@ -111,58 +126,98 @@ public sealed class PanResponseTransform
                                        && ex is not OperationCanceledException and not OutOfMemoryException)
             {
                 // Never attach exceptions: parser/transport messages may contain upstream data.
+                deadline.Check();
                 logger.LogWarning(new EventId(2, "Blocked"), "Protected response blocked; inspection failed.");
-                response.Headers.Clear();
-                response.StatusCode = StatusCodes.Status502BadGateway;
-                response.Headers.CacheControl = "no-store";
+                deadline.PrepareResponse(() =>
+                {
+                    response.Headers.Clear();
+                    response.StatusCode = StatusCodes.Status502BadGateway;
+                    response.Headers.CacheControl = "no-store";
+                });
                 output = Failure;
                 completedOutcome = PrivacyInspectionOutcome.Blocked;
             }
 
-            foreach (var header in new[] { "ETag", "Last-Modified", "Content-MD5", "Digest", "Content-Digest",
+            deadline.PrepareResponse(() =>
+            {
+                foreach (var header in new[] { "ETag", "Last-Modified", "Content-MD5", "Digest", "Content-Digest",
                          "Repr-Digest", "Signature", "Signature-Input", "Content-Encoding", "Content-Range", "Accept-Ranges", "Trailer", "Transfer-Encoding" })
-                response.Headers.Remove(header);
-            response.ContentType = "application/json; charset=utf-8";
-            response.ContentLength = output.Length;
+                    response.Headers.Remove(header);
+                response.ContentType = "application/json; charset=utf-8";
+                response.ContentLength = output.Length;
+            });
             writeStarted = true;
-            await response.Body.WriteAsync(output, context.CancellationToken);
-            inspection.Complete(completedOutcome);
+            deadline.Check();
+            await response.Body.WriteAsync(output, deadline.Token);
+            deadline.Check();
+            await deadline.DisposeAsync();
+            inspection.Complete(deadline.TimedOut ? PrivacyInspectionOutcome.TimedOut : completedOutcome);
         }
         catch (OperationCanceledException)
         {
-            inspection.Complete(PrivacyInspectionOutcome.Canceled);
+            await deadline.DisposeAsync();
+            inspection.Complete(deadline.TimedOut ? PrivacyInspectionOutcome.TimedOut : PrivacyInspectionOutcome.Canceled);
             throw;
         }
         catch
         {
-            inspection.Complete(writeStarted
+            await deadline.DisposeAsync();
+            inspection.Complete(deadline.TimedOut ? PrivacyInspectionOutcome.TimedOut : deadline.ClientCanceled
+                ? PrivacyInspectionOutcome.Canceled : writeStarted
                 ? PrivacyInspectionOutcome.WriteError
                 : PrivacyInspectionOutcome.Faulted);
             throw;
         }
     }
 
-    private static bool WriteSelected(JsonElement value, Utf8JsonWriter writer, CompiledPanPolicy policy, int segment)
+    private static bool WriteSelected(JsonElement value, Utf8JsonWriter writer, CompiledPanPolicy policy, int segment, InspectionDeadline deadline)
     {
+        deadline.Check();
         if (segment == policy.Segments.Length)
         {
-            if (value.ValueKind == JsonValueKind.Null) { value.WriteTo(writer); return false; }
+            if (value.ValueKind == JsonValueKind.Null) { CopyElement(value, writer, deadline); return false; }
             if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
             writer.WriteStringValue(Mask(value.GetString()!));
+            deadline.Check();
             return true;
         }
-        if (value.ValueKind != JsonValueKind.Object) { value.WriteTo(writer); return false; }
+        if (value.ValueKind != JsonValueKind.Object) { CopyElement(value, writer, deadline); return false; }
         var changed = false;
         writer.WriteStartObject();
         foreach (var property in value.EnumerateObject())
         {
+            deadline.Check();
             writer.WritePropertyName(property.Name);
             if (property.Name == policy.Segments[segment])
-                changed |= WriteSelected(property.Value, writer, policy, segment + 1);
-            else property.Value.WriteTo(writer);
+                changed |= WriteSelected(property.Value, writer, policy, segment + 1, deadline);
+            else CopyElement(property.Value, writer, deadline);
         }
         writer.WriteEndObject();
         return changed;
+    }
+
+    private static void CopyElement(JsonElement value, Utf8JsonWriter writer, InspectionDeadline deadline)
+    {
+        deadline.Check();
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            writer.WriteStartObject();
+            foreach (var property in value.EnumerateObject())
+            {
+                deadline.Check();
+                writer.WritePropertyName(property.Name);
+                CopyElement(property.Value, writer, deadline);
+            }
+            writer.WriteEndObject();
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            writer.WriteStartArray();
+            foreach (var element in value.EnumerateArray()) CopyElement(element, writer, deadline);
+            writer.WriteEndArray();
+        }
+        else value.WriteTo(writer);
+        deadline.Check();
     }
 
     private static string Mask(string value)

@@ -10,7 +10,8 @@ public enum PrivacyInspectionOutcome
     CapacityExceeded,
     Canceled,
     WriteError,
-    Faulted
+    Faulted,
+    TimedOut
 }
 
 public sealed class PrivacyTelemetry : IDisposable
@@ -19,6 +20,7 @@ public sealed class PrivacyTelemetry : IDisposable
     public const string MeterVersion = "1.0.0";
 
     private readonly InspectionBudget budget;
+    internal TimeSpan InspectionTimeout => budget.InspectionTimeout;
     private readonly Meter meter = new(MeterName, MeterVersion);
     private readonly Counter<long> outcomes;
     private readonly Histogram<double> duration;
@@ -36,9 +38,14 @@ public sealed class PrivacyTelemetry : IDisposable
             () => budget.Snapshot.ReservedBodyBytes, "By");
     }
 
-    public InspectionMeasurement? TryStartInspection(CompiledPanPolicy policy)
+    public InspectionMeasurement? TryStartInspection(CompiledPanPolicy policy) => TryStartInspection(policy, TimeProvider.System);
+
+    internal InspectionMeasurement? TryStartInspection(CompiledPanPolicy policy, TimeProvider clock)
     {
         ArgumentNullException.ThrowIfNull(policy);
+        // Conservative start: includes scheduling/lock delay before acquisition, without
+        // invoking an injectable clock under the budget lock. Never renew after acquisition.
+        var startedAt = clock.GetTimestamp();
         var lease = budget.TryAcquire(policy.MaxBodyBytes);
         if (lease is null)
         {
@@ -46,7 +53,7 @@ public sealed class PrivacyTelemetry : IDisposable
             return null;
         }
 
-        return new InspectionMeasurement(this, policy, lease);
+        return new InspectionMeasurement(this, policy, lease, clock, startedAt);
     }
 
     public void Dispose() => meter.Dispose();
@@ -73,6 +80,7 @@ public sealed class PrivacyTelemetry : IDisposable
         PrivacyInspectionOutcome.Canceled => "canceled",
         PrivacyInspectionOutcome.WriteError => "write_error",
         PrivacyInspectionOutcome.Faulted => "faulted",
+        PrivacyInspectionOutcome.TimedOut => "timed_out",
         _ => throw new ArgumentOutOfRangeException(nameof(outcome))
     };
 
@@ -81,11 +89,14 @@ public sealed class PrivacyTelemetry : IDisposable
         private readonly PrivacyTelemetry telemetry;
         private readonly CompiledPanPolicy policy;
         private readonly IDisposable lease;
-        private readonly long startedAt = Stopwatch.GetTimestamp();
+        private readonly TimeProvider clock;
+        internal long StartedAt { get; }
         private int completed;
 
-        internal InspectionMeasurement(PrivacyTelemetry telemetry, CompiledPanPolicy policy, IDisposable lease)
+        internal InspectionMeasurement(PrivacyTelemetry telemetry, CompiledPanPolicy policy, IDisposable lease, TimeProvider clock, long startedAt)
         {
+            this.clock = clock;
+            StartedAt = startedAt;
             this.telemetry = telemetry;
             this.policy = policy;
             this.lease = lease;
@@ -99,7 +110,7 @@ public sealed class PrivacyTelemetry : IDisposable
 
             try
             {
-                telemetry.RecordOutcome(policy, outcome, Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+                telemetry.RecordOutcome(policy, outcome, clock.GetElapsedTime(StartedAt).TotalMilliseconds);
             }
             finally
             {

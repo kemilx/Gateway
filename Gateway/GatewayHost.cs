@@ -36,6 +36,7 @@ public static class GatewayHost
             .ValidateOnStart();
         builder.Services.AddSingleton<PanPolicyCatalog>();
         builder.Services.AddSingleton<InspectionBudget>();
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<TimeProvider>(builder.Services, TimeProvider.System);
         builder.Services.AddSingleton<PrivacyTelemetry>();
         builder.Services.AddSingleton<PanResponseTransform>();
         builder.Services.AddReverseProxy()

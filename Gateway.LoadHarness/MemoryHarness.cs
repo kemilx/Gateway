@@ -24,6 +24,8 @@ internal static class MemoryHarness
             InspectionBudget = new()
             {
                 MaxConcurrentInspections = 8,
+                // Synthetic GC/barrier profiling is not a deadline benchmark.
+                InspectionTimeoutSeconds = 120,
                 MaxReservedBodyBytes = 8388608
             }
         }));
