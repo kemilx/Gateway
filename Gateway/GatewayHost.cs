@@ -36,6 +36,20 @@ public static class GatewayHost
             .ValidateOnStart();
         builder.Services.AddSingleton<PanPolicyCatalog>();
         builder.Services.AddSingleton<InspectionBudget>();
+        builder.Services.AddOptions<ProxyAdmissionOptions>()
+            .Bind(builder.Configuration.GetSection(ProxyAdmissionOptions.SectionName),
+                binder => binder.ErrorOnUnknownConfiguration = true)
+            .Validate(options => options.MaxConcurrentProxyRequests is >= 1 and <= 1024,
+                "MaxConcurrentProxyRequests must be between 1 and 1024.")
+            .ValidateOnStart();
+        builder.Services.AddSingleton<ProxyAdmission>();
+        builder.Services.AddOptions<UpstreamHeadersDeadlineOptions>()
+            .Bind(builder.Configuration.GetSection(UpstreamHeadersDeadlineOptions.SectionName),
+                binder => binder.ErrorOnUnknownConfiguration = true)
+            .Validate(options => options.TimeoutSeconds is null or (>= 1 and <= 120),
+                "TimeoutSeconds must be between 1 and 120 when present.")
+            .ValidateOnStart();
+        builder.Services.AddSingleton<UpstreamHeadersDeadlineSettings>();
         Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<TimeProvider>(builder.Services, TimeProvider.System);
         builder.Services.AddSingleton<PrivacyTelemetry>();
         builder.Services.AddSingleton<PanResponseTransform>();
@@ -47,6 +61,12 @@ public static class GatewayHost
                     Destinations = new Dictionary<string, DestinationConfig> { ["local"] = new() { Address = upstream } } }])
             .AddTransforms(context =>
             {
+                context.AddRequestTransform(transform =>
+                {
+                    transform.ProxyRequest.Options.Set(UpstreamHeadersEligibility.Key,
+                        UpstreamHeadersEligibility.IsEligible(transform.HttpContext));
+                    return ValueTask.CompletedTask;
+                });
                 var policy = context.Services.GetRequiredService<PanPolicyCatalog>().Find(context.Route.RouteId);
                 if (policy is null) return;
                 context.AddRequestTransform(transform =>
@@ -62,12 +82,17 @@ public static class GatewayHost
                 context.AddResponseTransform(transform =>
                     context.Services.GetRequiredService<PanResponseTransform>().ApplyAsync(transform, policy));
             });
+        builder.Services.AddSingleton<Yarp.ReverseProxy.Forwarder.IForwarderHttpClientFactory, UpstreamHeadersHttpClientFactory>();
         LoopbackListenerGuard.Register(builder.Services);
         var app = builder.Build();
         try
         {
             LoopbackListenerGuard.ValidateServer(app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>());
+            app.UseRouting();
+            app.UseMiddleware<ProxyAdmissionMiddleware>();
             app.MapReverseProxy();
+            app.Services.GetRequiredService<ProxyAdmission>();
+            app.Services.GetRequiredService<UpstreamHeadersDeadlineSettings>();
             // Freeze the global limits at startup, not on the first inspected response.
             app.Services.GetRequiredService<InspectionBudget>();
             // Create process-lifetime instruments and their budget-backed observable callbacks.

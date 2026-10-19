@@ -27,6 +27,37 @@ El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este 
 
 ## Contrato de configuración y arranque
 
+### Deadline opcional hasta headers upstream (local)
+
+`UpstreamHeadersDeadline:TimeoutSeconds` es un entero nullable **desactivado por
+defecto** y ausente de la configuración distribuida. Si se proporciona, admite
+1..120 segundos (rango técnico, no SLA aprobado). El binder rechaza campos
+desconocidos y valores inválidos al iniciar. Se captura una instantánea al
+construir el host; cambiar configuración después requiere reinicio.
+
+Solo se aplica a GET/HEAD cuyo servidor confirme `CanHaveBody == false` mediante
+`IHttpRequestBodyDetectionFeature`, sin upgrade ni extended CONNECT. Sin esa
+feature se excluye la petición. Es independiente de la política PAN y cubre ambas
+rutas; no utiliza headers públicos para marcar elegibilidad. No cubre uploads.
+
+El intervalo empieza inmediatamente antes del envío upstream y termina al aceptar
+sus headers, sin tocar versión, headers ni cuerpo de respuesta. Usa el pool y
+ownership de la factory YARP 2.3 mediante `WrapHandler` y `HttpMessageInvoker`.
+La expiración cancela solo el token enlazado de esa invocación y YARP la clasifica
+como 504 si no prevalece cancelación cliente/YARP. No hay retries ni métricas de
+inspección nuevas. El timer se retira antes de entregar headers aceptados: un
+cuerpo lento sigue sujeto a los límites de actividad/inspección ya existentes
+(15 s de actividad YARP y 10 s de inspección por defecto), no a este deadline.
+
+No es un hard timeout: se espera el envío y los callbacks de cancelación ya
+iniciados; código no cooperativo puede retener el permiso de admisión hasta
+terminar. Una respuesta que pierde contra expiración/cancelación se dispone.
+No se ha seleccionado duración operativa ni aprobado SLA/uploads. No cambia
+defaults ni requiere migración; activar expresamente solo tras decidir la
+duración para el entorno local y reiniciar con el nuevo binario. Solo se activa
+en pruebas sintéticas; permanece desactivado en la configuración distribuida.
+No se ha realizado despliegue.
+
 ### Listener local obligatorio
 
 Gateway solo permite listeners IP loopback (`127.0.0.0/8` y `::1`), con el
@@ -57,8 +88,11 @@ Límites: se valida **cada bind**, no todo el conjunto de endpoints de forma
 atómica; un listener loopback válido puede abrirse antes de que falle otro, pero
 ningún endpoint incompatible llega al bind del SO. Una recarga inválida nunca
 abre el endpoint incompatible; la continuidad de los anteriores depende de Kestrel.
-Las pruebas verifican el guard repetido, no una recarga de archivo de extremo a
-extremo. El código que configura o modifica el host dentro del proceso es de
+Las pruebas verifican el guard repetido y una recarga real de archivo: primero
+un cambio loopback válido con petición HTTP positiva, después wildcard con señal
+de rechazo del guard capturada exclusivamente en memoria de test. Esto no prueba
+todos los escenarios de recarga ni garantiza continuidad de endpoints anteriores.
+El código que configura o modifica el host dentro del proceso es de
 confianza; esto no es un sandbox frente a código arbitrario, proxies externos,
 port forwarding o cambios del runtime. No cambia ni protege el listener de TestApi.
 
@@ -140,6 +174,33 @@ revisión adicionales.
 
 ## Presupuesto global de inspección
 
+### Admisión global de proxy (MVP-11)
+
+`ProxyAdmission:MaxConcurrentProxyRequests` tiene default CLR y distribuido **6**,
+entero en **1..1024**, validado antes de servir tráfico. La sección es opcional;
+campos desconocidos o valores inválidos impiden arrancar. Se congela al construir
+la instancia: los cambios requieren reinicio.
+
+Un singleton por instancia admite todas las rutas YARP, incluido passthrough,
+después del routing y antes del forwarding. No hay cola: la adquisición atómica
+inmediata rechaza saturación con `503 {"code":"gateway_capacity_exceeded"}`,
+JSON UTF-8 y `Cache-Control: no-store`, sin contactar al upstream. Los endpoints
+locales/no YARP quedan fuera. Se conserva `MapReverseProxy()` estándar.
+
+El permiso cubre el pipeline esperado completo, incluidas escritura y limpieza:
+se libera una vez al retornar o lanzar, nunca por timer, RequestAborted ni
+OnCompleted. Un trabajo que no termina puede retenerlo indefinidamente. No es
+un límite distribuido ni un límite de memoria. Es independiente del presupuesto
+PAN (6 slots/6 MiB/10 s), que no cambia; ActivityTimeout sigue en 15 s, sin nuevos
+timeouts. No se añaden métricas ni tags al contrato de telemetría de inspección.
+Los perfiles HTTP/aislados históricos del harness fijan explícitamente admisión 8
+para no truncar sus pruebas de inspección N7/N8; no son el default operativo.
+
+Compatibilidad: ahora passthrough y la espera de headers también consumen admisión.
+No hay migraciones ni paquetes nuevos. Actualizar binario/configuración juntos y
+reiniciar; para rollback retirar la sección nueva. No se realizó despliegue ni
+se autoriza uso con datos reales.
+
 `PanPolicies.InspectionBudget` es obligatorio. Sus valores predeterminados son
 `MaxConcurrentInspections: 6` (rango 1..1024) y `MaxReservedBodyBytes: 6291456`
 (6 MiB; rango 1..1073741824, 1 GiB). Cada `Policy.MaxBodyBytes` debe caber en
@@ -185,7 +246,29 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
 Sigue siendo un MVP local con datos exclusivamente sintéticos y no está
 aprobado para producción.
 
+### Aislamiento de consumidores de métricas (MVP-12)
+
+La publicación del contador y del histograma es best effort e independiente:
+una excepción ordinaria de un consumidor síncrono no cambia la respuesta HTTP,
+la cancelación ni el error original, y no impide intentar el otro instrumento.
+Puede perderse parte de la telemetría; no hay atomicidad entre HTTP y métricas.
+Se conservan los nombres, tags, outcomes y la liberación del presupuesto.
+Los errores de validación propios y fallos graves como `OutOfMemoryException`
+no se ocultan. No se registran excepciones del consumidor ni se añaden tareas,
+colas o publicaciones recursivas.
+
+Esto **no aísla callbacks bloqueantes**: los consumidores deben retornar rápido.
+Tampoco garantiza que otros listeners reciban una medición si uno de ellos lanza
+dentro de la misma publicación. Los gauges observables conservan su contrato.
+
 ## Carga y memoria local (MVP-05)
+
+Revalidación posterior a los cambios locales de resiliencia:
+[MVP-16, 19 de octubre de 2026](evidence/mvp16/2026-10-19-local-summary.md).
+Las 40 ejecuciones del perfil sintético N6 cumplen el umbral de memoria con
+32,30% de headroom mínimo observado. El perfil usa admisión 8 y presupuesto
+8 MiB, no todos los defaults operativos; no es sizing de producción ni autoriza
+subir límites. Se conserva intacta la evidencia histórica.
 
 `Gateway.LoadHarness` ejecuta dos mediciones separadas sin paquetes nuevos ni
 cambios en los límites predeterminados. Compilar y consultar opciones:

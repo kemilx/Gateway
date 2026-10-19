@@ -389,6 +389,175 @@ public sealed class PrivacyTelemetryTests
         }
     }
 
+    [Theory]
+    [InlineData(Outcomes, false)]
+    [InlineData(Duration, false)]
+    [InlineData(Outcomes, true)]
+    [InlineData(Duration, true)]
+    public async Task Throwing_listener_preserves_masked_or_blocked_HTTP_response(string instrument, bool blocked)
+    {
+        var policy = Policy("TelemetryThrowingHttp");
+        using var metrics = new MetricCollector(instrument, policy.PolicyId);
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(blocked ? "{INVALID" : JsonBody), downstream);
+
+        await invocation.ApplyAsync();
+
+        Assert.Equal(blocked ? StatusCodes.Status502BadGateway : StatusCodes.Status200OK,
+            invocation.Context.HttpContext.Response.StatusCode);
+        Assert.Equal(blocked ? "{\"code\":\"privacy_inspection_failed\"}"
+            : "{\"payment\":{\"cardNumber\":\"************1111\"}}", Encoding.UTF8.GetString(downstream.ToArray()));
+        AssertOutcomeAndDuration(metrics, policy, blocked ? "blocked" : "inspected");
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Fact]
+    public async Task Throwing_counter_listener_preserves_capacity_denial_contract()
+    {
+        var policy = Policy("TelemetryThrowingCapacity");
+        using var metrics = new MetricCollector(Outcomes, policy.PolicyId);
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        using var held = budget.TryAcquire(1);
+        Assert.NotNull(held);
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream);
+
+        await invocation.ApplyAsync();
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, invocation.Context.HttpContext.Response.StatusCode);
+        Assert.Equal("{\"code\":\"privacy_capacity_exceeded\"}", Encoding.UTF8.GetString(downstream.ToArray()));
+        AssertOutcome(metrics, policy, "capacity_exceeded");
+        Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
+        Assert.Equal((1, 1L), budget.Snapshot);
+        held.Dispose();
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(Outcomes)]
+    [InlineData(Duration)]
+    [InlineData("*")]
+    public void Throwing_listeners_keep_concurrent_and_repeated_completion_idempotent(string instrument)
+    {
+        var policy = Policy("TelemetryThrowingConcurrent");
+        using var metrics = new MetricCollector(instrument, policy.PolicyId);
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        using var measurement = telemetry.TryStartInspection(policy);
+        Assert.NotNull(measurement);
+
+        Parallel.For(0, 100, _ => measurement.Complete(PrivacyInspectionOutcome.Inspected));
+        measurement.Complete(PrivacyInspectionOutcome.Canceled);
+        measurement.Dispose();
+
+        AssertOutcomeAndDuration(metrics, policy, "inspected");
+        Assert.Equal((0, 0L), budget.Snapshot);
+        using var next = telemetry.TryStartInspection(Policy("TelemetryAfterThrowingConcurrent"));
+        Assert.NotNull(next);
+        Assert.Equal((1, (long)ReservedBodyBytes), budget.Snapshot);
+        measurement.Dispose();
+        Assert.Equal((1, (long)ReservedBodyBytes), budget.Snapshot);
+        next.Dispose();
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(Outcomes, false)]
+    [InlineData(Duration, false)]
+    [InlineData(Outcomes, true)]
+    [InlineData(Duration, true)]
+    public async Task Throwing_listener_preserves_original_error_or_cancellation(string instrument, bool canceled)
+    {
+        var policy = Policy("TelemetryThrowingOriginalFailure");
+        using var metrics = new MetricCollector(instrument, policy.PolicyId);
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        using var cancellation = new CancellationTokenSource();
+        using var downstream = new ControlledWriteStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream, cancellation.Token);
+
+        var pending = invocation.ApplyAsync();
+        await downstream.WriteStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        if (canceled)
+        {
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        else
+        {
+            var failure = new IOException("Synthetic original write failure.");
+            downstream.Fail(failure);
+            var actual = await Assert.ThrowsAsync<IOException>(async () =>
+                await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Same(failure, actual);
+        }
+
+        AssertOutcomeAndDuration(metrics, policy, canceled ? "canceled" : "write_error");
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(Outcomes)]
+    [InlineData(Duration)]
+    public void Listener_cancellation_does_not_cancel_successful_inspection(string instrument)
+    {
+        var policy = Policy("TelemetryListenerCancellation");
+        using var metrics = new MetricCollector(instrument, policy.PolicyId, new OperationCanceledException());
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        using var measurement = telemetry.TryStartInspection(policy);
+        Assert.NotNull(measurement);
+
+        measurement.Complete(PrivacyInspectionOutcome.Inspected);
+
+        AssertOutcomeAndDuration(metrics, policy, "inspected");
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(Outcomes)]
+    [InlineData(Duration)]
+    public void Listener_out_of_memory_is_not_hidden_and_lease_is_released(string instrument)
+    {
+        var policy = Policy("TelemetryListenerOutOfMemory");
+        var failure = new OutOfMemoryException("Synthetic listener failure; no memory exhaustion.");
+        using var metrics = new MetricCollector(instrument, policy.PolicyId, failure);
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        using var measurement = telemetry.TryStartInspection(policy);
+        Assert.NotNull(measurement);
+
+        var actual = Assert.Throws<OutOfMemoryException>(() => measurement.Complete(PrivacyInspectionOutcome.Inspected));
+
+        Assert.Same(failure, actual);
+        Assert.Equal((0, 0L), budget.Snapshot);
+        measurement.Dispose();
+        Assert.Single(metrics.ForPolicy(Outcomes, policy.PolicyId));
+    }
+
+    [Theory]
+    [InlineData(PrivacyInspectionOutcome.CapacityExceeded)]
+    [InlineData((PrivacyInspectionOutcome)999)]
+    public void Invalid_completion_outcome_is_not_hidden_by_listener_isolation(PrivacyInspectionOutcome outcome)
+    {
+        var policy = Policy("TelemetryInvalidOutcome");
+        using var metrics = new MetricCollector("*", policy.PolicyId);
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        using var measurement = telemetry.TryStartInspection(policy);
+        Assert.NotNull(measurement);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => measurement.Complete(outcome));
+        Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
+        measurement.Dispose();
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
     private static void AssertOutcomeAndDuration(MetricCollector metrics, CompiledPanPolicy policy,
         string expectedOutcome)
     {
@@ -473,8 +642,16 @@ public sealed class PrivacyTelemetryTests
         private readonly ConcurrentQueue<CapturedMeasurement> measurements = new();
         private readonly MeterListener listener = new();
 
-        public MetricCollector()
+        private readonly string? failingInstrument;
+        private readonly string? failingPolicyId;
+        private readonly Exception listenerFailure;
+
+        public MetricCollector(string? failingInstrument = null, string? failingPolicyId = null,
+            Exception? failure = null)
         {
+            this.failingInstrument = failingInstrument;
+            this.failingPolicyId = failingPolicyId;
+            listenerFailure = failure ?? new InvalidOperationException("Synthetic metric consumer failure.");
             listener.InstrumentPublished = (instrument, currentListener) =>
             {
                 if (instrument.Meter.Name == PrivacyTelemetry.MeterName
@@ -515,6 +692,11 @@ public sealed class PrivacyTelemetryTests
             foreach (var tag in tags) capturedTags.Add(tag.Key, tag.Value?.ToString());
             measurements.Enqueue(new CapturedMeasurement(instrument.Name, instrument.Unit,
                 Convert.ToDouble(value), capturedTags, instrument.Meter));
+            // Match a test-specific policy, not every Gateway meter in this process.
+            // Capture before throwing to prove both independent publications were attempted.
+            if ((failingInstrument == instrument.Name || failingInstrument == "*")
+                && capturedTags.GetValueOrDefault("gateway.policy.id") == failingPolicyId)
+                throw listenerFailure;
         }
     }
 

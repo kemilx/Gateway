@@ -31,6 +31,8 @@ internal static class IsolatedWorkers
         b.Configuration.Sources.Clear();
         b.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
+            // Preserve the historical inspection sizing profile independently of proxy admission.
+            ["ProxyAdmission:MaxConcurrentProxyRequests"] = "8",
             ["PanPolicies:InspectionBudget:MaxConcurrentInspections"] = maxConcurrentInspections.ToString(CultureInfo.InvariantCulture),
             ["PanPolicies:InspectionBudget:MaxReservedBodyBytes"] = "8388608",
             ["PanPolicies:CoverageContract:Version"] = "v1",

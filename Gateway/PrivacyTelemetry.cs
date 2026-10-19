@@ -68,9 +68,27 @@ public sealed class PrivacyTelemetry : IDisposable
             { "gateway.policy.version", policy.Version },
             { "gateway.privacy.outcome", GetOutcomeName(outcome) }
         };
-        outcomes.Add(1, tags);
-        if (durationMilliseconds is { } elapsed) duration.Record(elapsed, tags);
+        // Listener callbacks run synchronously. Isolate each publication so an ordinary
+        // consumer failure cannot affect inspection or prevent the other instrument.
+        // Keep tag/outcome validation above these boundaries; never log consumer errors.
+        try
+        {
+            outcomes.Add(1, tags);
+        }
+        catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
+
+        if (durationMilliseconds is { } elapsed)
+        {
+            try
+            {
+                duration.Record(elapsed, tags);
+            }
+            catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
+        }
     }
+
+    private static bool IsOrdinaryListenerFailure(Exception exception) =>
+        exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException);
 
     private static string GetOutcomeName(PrivacyInspectionOutcome outcome) => outcome switch
     {

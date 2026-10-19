@@ -34,6 +34,8 @@ internal static class HttpHarness
                 b.Configuration.Sources.Clear();
                 b.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
                 {
+                    // This synthetic profile measures inspection concurrency up to eight.
+                    ["ProxyAdmission:MaxConcurrentProxyRequests"] = "8",
                     ["PanPolicies:InspectionBudget:MaxConcurrentInspections"] = "8",
                     ["PanPolicies:InspectionBudget:MaxReservedBodyBytes"] = "8388608",
                     ["PanPolicies:CoverageContract:Version"] = "v1",

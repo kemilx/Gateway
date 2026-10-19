@@ -1,0 +1,66 @@
+{
+  "schema": "gateway.mvp16.local-sizing-summary.v1",
+  "date": "2026-10-19",
+  "classification": "HARD_LIMIT_LOCAL_CANDIDATE",
+  "status": "passed",
+  "target": {
+    "baseCommit": "995e5d53754e0fa3315462f2381591faf23b39b5",
+    "includesUncommittedChanges": true,
+    "reviewedFilesCount": 14,
+    "snapshotSha256": "CF916E31D84EFD76EE9A4A96C9A56B714F9672AC9EFC9584038F3065E21B3601",
+    "rawReportSha256": "0C500568EE9A478E03139C7948A07DEC73163FA74F0CC32135703B6D7C8D5E44"
+  },
+  "environment": {
+    "os": "Windows 10.0.26300",
+    "architecture": "X64",
+    "runtime": ".NET/ASP.NET Core 10.0.12"
+  },
+  "profile": {
+    "name": "token-dense-v1",
+    "bodyBytes": 1048576,
+    "concurrencies": [1, 2, 4, 6],
+    "repetitions": 10,
+    "requestsPerRun": 64,
+    "maxConcurrentProxyRequests": 8,
+    "maxConcurrentInspections": 6,
+    "maxReservedBodyBytes": 8388608,
+    "inspectionTimeoutSeconds": 10,
+    "upstreamHeadersDeadlineEnabled": false,
+    "apiAndClientExcludedFromJob": true
+  },
+  "results": {
+    "runs": 40,
+    "passedRuns": 40,
+    "measuredRequests": 2560,
+    "http200": 2560,
+    "validatedWarmupRequests": 80,
+    "outcomes": 2560,
+    "durations": 2560,
+    "canaryPassedRuns": 40,
+    "budgetReleasedRuns": 40,
+    "cooperativeCleanupRuns": 40,
+    "enforcementFailedRuns": 0,
+    "maxActiveInspections": 6,
+    "maxReservedBodyBytes": 6291456,
+    "maxPrivateBytes": 363360256,
+    "maxJobProcessCommitBytes": 363474944
+  },
+  "acceptance": {
+    "jobProcessMemoryLimitBytes": 536870912,
+    "requiredHeadroomPercent": 30,
+    "allowedBytes": 375809638,
+    "privateBytesMargin": 12449382,
+    "jobCommitMargin": 12334694,
+    "minimumObservedHeadroomPercent": 32.2975158691406
+  },
+  "limitations": [
+    "Synthetic local closed-loop profile, not production sizing or a sustained-load guarantee.",
+    "Admission 8 and reservation cap 8 MiB differ from operational defaults 6 and 6 MiB; observed reservations peaked at 6 MiB.",
+    "Headers deadline remained disabled; this does not size the enabled opt-in path.",
+    "Private-byte sampling can miss transients; the Job peak covers startup, warmup, load and cooperative shutdown.",
+    "The Job limits per-process commit, not working set, container memory or combined gateway/API/client usage.",
+    "No OOM probe, forced GC, baseline comparison, performance acceptance budget or new exhaustive fault regression.",
+    "Measured source was an uncommitted snapshot; the base commit alone does not identify it.",
+    "Historical evidence is unchanged; no controlled attribution of differences to individual code changes."
+  ]
+}
