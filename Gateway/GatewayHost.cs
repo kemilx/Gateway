@@ -62,9 +62,11 @@ public static class GatewayHost
                 context.AddResponseTransform(transform =>
                     context.Services.GetRequiredService<PanResponseTransform>().ApplyAsync(transform, policy));
             });
+        LoopbackListenerGuard.Register(builder.Services);
         var app = builder.Build();
         try
         {
+            LoopbackListenerGuard.ValidateServer(app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>());
             app.MapReverseProxy();
             // Freeze the global limits at startup, not on the first inspected response.
             app.Services.GetRequiredService<InspectionBudget>();

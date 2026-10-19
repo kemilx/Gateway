@@ -27,6 +27,45 @@ El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este 
 
 ## Contrato de configuración y arranque
 
+### Listener local obligatorio
+
+Gateway solo permite listeners IP loopback (`127.0.0.0/8` y `::1`), con el
+transporte sockets estándar de Kestrel. Conserva puertos efímeros (`:0` sobre IP)
+y el perfil `https://localhost:52734;http://localhost:52735` (HTTPS requiere un
+certificado local válido). No se añade configuración TLS ni autenticación.
+
+El guard verifica el **EndPoint efectivo antes de cada bind de transporte**, no
+solo `Upstream` ni una lista de URLs que Kestrel puede eclipsar. Aplica a `--urls`,
+`urls` de configuración, `ASPNETCORE_URLS`/`DOTNET_URLS`, `HTTP_PORTS`/`HTTPS_PORTS`
+(incluidas variantes prefijadas), endpoints `Kestrel:Endpoints`, `Listen` en código
+y precedencia `PreferHostingUrls`. Las expansiones wildcard de puertos se rechazan.
+Kestrel 10 expande `localhost` y nombres bajo `.localhost` a IP loopback; el guard
+valida esas IP resultantes y las admite. Otros hostnames cuyos bindings efectivos
+sean wildcard se rechazan; el guard no realiza resolución DNS como excepción de confianza.
+La misma comprobación se ejecuta en binds posteriores, incluidas recargas de
+endpoints: no hay una ventana de apertura no-loopback antes de validar.
+
+Wildcard, IP no loopback, IPv4-mapped IPv6 (incluso loopback), Unix sockets,
+named pipes y handles heredados se rechazan como no soportados/no verificables.
+También se rechazan transportes sockets/servidores alternativos y callbacks de
+creación de sockets personalizados; no se habilita transporte multiplexado/HTTP3.
+El error del guard es fijo, sin reproducir endpoints ni configuración. El ejecutable
+devuelve código 1 y diagnóstico genérico ante fallo de inicio/ejecución, sin
+imprimir excepciones (también para sintaxis inválida de configuración).
+
+Límites: se valida **cada bind**, no todo el conjunto de endpoints de forma
+atómica; un listener loopback válido puede abrirse antes de que falle otro, pero
+ningún endpoint incompatible llega al bind del SO. Una recarga inválida nunca
+abre el endpoint incompatible; la continuidad de los anteriores depende de Kestrel.
+Las pruebas verifican el guard repetido, no una recarga de archivo de extremo a
+extremo. El código que configura o modifica el host dentro del proceso es de
+confianza; esto no es un sandbox frente a código arbitrario, proxies externos,
+port forwarding o cambios del runtime. No cambia ni protege el listener de TestApi.
+
+Compatibilidad: configuraciones que antes exponían Gateway fuera de loopback ahora
+fallan; sustituirlas por IP loopback/localhost antes de reiniciar con el binario
+nuevo. No hay migraciones, paquetes nuevos ni despliegue realizado.
+
 `Gateway/appsettings.json` contiene una única sección `PanPolicies`, con el contrato versionado `CoverageContract` y una lista `Policies`:
 
 ```json
