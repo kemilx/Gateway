@@ -120,13 +120,14 @@ internal static class IsolatedHarness
         foreach (var a in r.Aggregates) text.AppendLine($"|{a.Concurrency}|{a.Runs}|{a.MaxPrivateBytes}|{a.MedianPrivateBytes:F0}|{a.MaxManagedBytes}|{a.MaxWorkingSetBytes}|{a.MedianRps:F2}|{a.MedianP50Ms:F2}|{a.MedianP95Ms:F2}|{a.AllPassed}|");
         return text.ToString();
     }
-    private sealed class Child : IAsyncDisposable
+    internal sealed class Child : IAsyncDisposable
     {
         private readonly Process? process;
         private readonly WindowsJobProcess? jobProcess;
         private readonly Enforcement? enforcement;
         private readonly Task drain;
         private bool stopped;
+        private bool finishRequested;
         private bool disposed;
         private StreamReader StandardOutput => jobProcess?.StandardOutput ?? process!.StandardOutput;
         private StreamReader StandardError => jobProcess?.StandardError ?? process!.StandardError;
@@ -137,6 +138,12 @@ internal static class IsolatedHarness
         private void KillTree() { if (jobProcess is not null) jobProcess.KillTree(); else process!.Kill(true); }
         internal void VerifyAfter() { if (enforcement is not null) jobProcess!.Snapshot(enforcement, before: false); }
         internal Child(params string[] args) : this(null, args) { }
+        // Ownership seam for tests of real process exit/drain behavior; no CLI launcher.
+        internal Child(Process ownedProcess)
+        {
+            process = ownedProcess;
+            drain = Drain();
+        }
         internal Child(Enforcement? enforcement, params string[] args)
         {
             this.enforcement = enforcement;
@@ -188,8 +195,20 @@ internal static class IsolatedHarness
         internal async Task Stop(CancellationToken ct)
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(15));
-            await Command("stop", "stopped", deadline.Token); await WaitForExit(deadline.Token);
-            await drain.WaitAsync(deadline.Token); Common.Require(ExitCode == 0); stopped = true;
+            await Command("stop", "stopped", deadline.Token);
+            await WaitForCleanExit(deadline.Token);
+        }
+        internal async Task FinishStop(CancellationToken ct)
+        {
+            // A versioned stop was already acknowledged: never send a legacy command.
+            finishRequested = true;
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(15));
+            await WaitForCleanExit(deadline.Token);
+        }
+        private async Task WaitForCleanExit(CancellationToken ct)
+        {
+            await WaitForExit(ct); await drain.WaitAsync(ct);
+            Common.Require(ExitCode == 0); stopped = true;
         }
         public async ValueTask DisposeAsync()
         {
@@ -206,8 +225,12 @@ internal static class IsolatedHarness
                 }
                 if (!stopped && !HasExited)
                 {
-                    try { using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3)); await Stop(deadline.Token); }
-                    catch { if (!HasExited) KillTree(); }
+                    if (finishRequested) KillTree();
+                    else
+                    {
+                        try { using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3)); await Stop(deadline.Token); }
+                        catch { if (!HasExited) KillTree(); }
+                    }
                 }
                 using var exit = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 await WaitForExit(exit.Token); await drain.WaitAsync(exit.Token);

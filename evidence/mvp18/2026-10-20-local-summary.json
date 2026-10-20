@@ -1,0 +1,88 @@
+{
+  "schema": "gateway.mvp18.local-comparison-summary.v1",
+  "date": "2026-10-20",
+  "status": "completed",
+  "classification": "LOCAL_OBSERVATIONAL_COMPARISON",
+  "performanceAcceptance": "not_evaluated",
+  "target": {
+    "baseCommit": "9a90f0acab8f5eacc5544dd41209858743ab8d0a",
+    "includesUncommittedHealthAndCompareChanges": true,
+    "compareSourceSnapshotSha256": "99F631BE8A4EFA9A7E86C92A53A945AE59748AE47641209DAC5DD24851659CF6",
+    "compiledHarnessSha256": "EFA1421F2D56ADB82368A059C564F7ED7E0F1DB2CA209482A653515D3310B77A",
+    "compiledGatewaySha256": "EC9337942A30E15F4C3389FBE2F2D380167497A901674549E3F52AE907053FBA",
+    "compiledApiSha256": "BF903ED78EA340361A29C976D656959BF84EB06A8F96D3AE44B84A4BCCECFA16",
+    "rawReportSha256": "B4DE7C362C7678CEE695A51608F3179740E927E67CA6D884A142540F9FC2281B"
+  },
+  "profile": {
+    "bodyBytes": 1048576,
+    "concurrency": 6,
+    "repetitions": 2,
+    "requestsPerArm": 256,
+    "freshApiAndGatewayPerArm": true,
+    "pairOrders": [["baseline", "mask"], ["mask", "baseline"]],
+    "warmupWavesPerArm": 2,
+    "maxConcurrentProxyRequests": 8,
+    "maxConcurrentInspections": 6,
+    "maxReservedBodyBytes": 8388608,
+    "inspectionTimeoutSeconds": 10,
+    "upstreamHeadersDeadlineEnabled": false,
+    "forcedGc": false,
+    "jobMemoryLimitEnabled": false
+  },
+  "validation": {
+    "attempts": 1,
+    "exitCode": 0,
+    "validPairs": 2,
+    "validArms": 4,
+    "validatedMeasuredRequests": 1024,
+    "validatedWarmupRequests": 48,
+    "measuredInspectionOutcomes": 512,
+    "measuredInspectionDurations": 512,
+    "releasedArms": 4,
+    "remainingWorkers": 0,
+    "independentExecutionVerification": "passed",
+    "rawLatencyPercentilesRecomputedIndependently": false,
+    "releaseTestsPassed": 272,
+    "releaseTestsSkipped": 0,
+    "reviewDecision": "APPROVED_WITH_WARNINGS"
+  },
+  "medianOfTwoArmMeasurements": {
+    "baseline": {
+      "p50Ms": 3.7602,
+      "p95Ms": 8.4154,
+      "p99Ms": 15.23425,
+      "requestsPerSecond": 1379.7147455270051,
+      "gatewayCpuMsPerRequest": 4.150390625,
+      "gatewayAllocatedBytesPerRequest": 11649.6875
+    },
+    "mask": {
+      "p50Ms": 44.879,
+      "p95Ms": 101.7703,
+      "p99Ms": 157.37635,
+      "requestsPerSecond": 106.67953110149141,
+      "gatewayCpuMsPerRequest": 55.877685546875,
+      "gatewayAllocatedBytesPerRequest": 8640117.984375
+    }
+  },
+  "maximumSampledPrivateBytes": {
+    "baseline": 27807744,
+    "mask": 373276672
+  },
+  "medianPairedDeltaMaskMinusBaseline": {
+    "p95Ms": 93.3549,
+    "p99Ms": 142.1421,
+    "requestsPerSecond": -1273.0352144255137,
+    "gatewayCpuMsPerRequest": 51.727294921875,
+    "gatewayAllocatedBytesPerRequest": 8628468.296875
+  },
+  "limitations": [
+    "Two paired repetitions with one synthetic 1 MiB payload and concurrency 6; no production SLA, sizing or performance gate.",
+    "Baseline is the same gateway without response inspection, not a separate bare YARP application.",
+    "Median per-run percentiles are not pooled/global percentiles. No confidence interval or coordinated-omission correction.",
+    "Gateway CPU and allocations include runtime, sampler and protocol overhead; client and worker measurement windows differ.",
+    "Memory peaks are sampled, independent and non-simultaneous; no Job, hard limit or forced GC was used.",
+    "Synthetic admission 8 and reservation 8 MiB are not operational defaults 6 and 6 MiB.",
+    "No attribution of historical differences to code changes, no deployment, and no change of operational limits.",
+    "Native stdin read ownership ends at worker process exit; native cancellation is not guaranteed."
+  ]
+}

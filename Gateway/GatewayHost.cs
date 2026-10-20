@@ -91,6 +91,9 @@ public static class GatewayHost
             app.UseRouting();
             app.UseMiddleware<ProxyAdmissionMiddleware>();
             app.MapReverseProxy();
+            // Resolve explicitly before publishing local readiness; invalid PAN configuration must fail startup.
+            app.Services.GetRequiredService<PanPolicyCatalog>();
+            app.MapGatewayHealth();
             app.Services.GetRequiredService<ProxyAdmission>();
             app.Services.GetRequiredService<UpstreamHeadersDeadlineSettings>();
             // Freeze the global limits at startup, not on the first inspected response.

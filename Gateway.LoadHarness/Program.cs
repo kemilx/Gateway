@@ -13,6 +13,7 @@ internal static class Program
         {
             if (args is ["--help"])
             {
+                Console.WriteLine("compare --output <artifacts/mvp05/NEW-directory> [--requests-per-arm N] [--repetitions N] [--concurrency N]\nLocal observational comparison, NOT performance acceptance. Defaults/ranges: 256/8..4096, 2/1..4, 6/1..6.");
                 Console.WriteLine("hard-limit --output <artifacts/mvp05/directory> [--requests-per-concurrency N] [--repetitions N] [--memory-limit-mib N] [--headroom-percent N] [--max-concurrent-inspections N]\nWindows only, opt-in enforced process commit limit. Defaults: 64, 3, 512, 30, 6; same ranges as isolated. API/client excluded.");
                 Console.WriteLine("isolated --output <artifacts/mvp05/directory> [--requests-per-concurrency N] [--repetitions N] [--memory-limit-mib N] [--headroom-percent N] [--max-concurrent-inspections N]\nValores por defecto/rangos: requests 64/8..100000; repetitions 3/1..10; memory MiB 512/64..65536; headroom percent 30/1..90; max-concurrent-inspections 8/4..8 (entero estricto). Solo configura workers sintéticos; no cambia Gateway/appsettings.\napi-worker (interno, sin opciones)\ngateway-worker --upstream <loopback-origin> --max-concurrent-inspections N (interno; 4..8)");
                 Console.WriteLine("Local synthetic harness only; NOT for production.\nmemory --output <artifacts/mvp05/directory>\nhttp|all --output <artifacts/mvp05/directory> [--requests-per-concurrency N] (8..100000, default 16)\nmemory-worker --concurrency N (internal; N=1,2,4,8)\nOutput must remain under the local artifacts/mvp05 directory.\nMemory: fresh workers, MEASURED_NOT_SIZED. HTTP: shared-process observational memory.");
@@ -22,6 +23,14 @@ internal static class Program
             var command = args[0]; var options = new Dictionary<string, string>(StringComparer.Ordinal);
             for (var i = 1; i < args.Length; i += 2) Common.Require(i + 1 < args.Length && options.TryAdd(args[i], args[i + 1]));
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            if (command == "compare")
+                return await CompareHarness.Run(CompareHarness.Parse(options), timeout.Token) ? 0 : 1;
+            if (command == "compare-gateway-worker")
+            {
+                Common.Require(options.Count == 1 && options.ContainsKey("--upstream"));
+                await CompareWorkers.Run(options["--upstream"], timeout.Token);
+                return 0;
+            }
             if (command == "memory-worker")
             {
                 Common.Require(options.Count == 1 && options.ContainsKey("--concurrency"));

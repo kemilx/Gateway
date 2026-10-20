@@ -24,7 +24,7 @@ internal static class IsolatedWorkers
             && uri.Port > 0 && uri.UserInfo == "" && uri.AbsolutePath == "/" && uri.Query == "" && uri.Fragment == "");
         return uri!;
     }
-    private static void Configure(WebApplicationBuilder b, int maxConcurrentInspections)
+    internal static void Configure(WebApplicationBuilder b, int maxConcurrentInspections)
     {
         b.Logging.ClearProviders();
         b.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));

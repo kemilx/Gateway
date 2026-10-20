@@ -27,6 +27,36 @@ El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este 
 
 ## Contrato de configuración y arranque
 
+### Salud local RF13 (MVP-17)
+
+En el listener loopback existente, `GET /health/live` devuelve siempre
+`200 {"status":"alive"}` cuando el pipeline puede atenderlo. `GET /health/ready`
+devuelve `200 {"status":"ready"}` solo con el catálogo PAN válido inicializado,
+`ApplicationStarted` señalado y `ApplicationStopping` no señalado; en otro estado
+devuelve `503 {"status":"not_ready"}`. Ambos usan JSON UTF-8
+(`application/json; charset=utf-8`) y `Cache-Control: no-store`, sin detalles internos.
+El catálogo se resuelve explícitamente durante Build: configuración PAN inválida
+impide arrancar; no se captura para continuar sirviendo health.
+
+Son endpoints locales, fuera de YARP y de sus permisos de admisión/inspección.
+Ready no indica upstream disponible ni capacidad libre. Consultan los tokens del
+host por petición, con prioridad a stopping, sin sondeos externos, estado propio,
+listeners nuevos ni reload de políticas. Durante shutdown real el transporte puede
+cerrarse: no se garantiza observar un 503 después del cierre del socket.
+
+Las pruebas nuevas usan Kestrel real con seis peticiones mixtas YARP retenidas
+antes de headers: ambos health siguen en 200, sin contactos upstream adicionales,
+con admisión en 6 y presupuesto de inspección en cero. También cubren upstream
+inaccesible, contrato exacto, ausencia de RouteModel, rechazo de PAN inválido y
+transiciones de lifetime con un fake explícito (no prueba de transporte shutdown).
+No se repitió sizing: MVP-16 corresponde al snapshot anterior; no demuestra una
+medición exacta del binario con health. No se modifica esa evidencia histórica.
+
+Compatibilidad: solo se añaden estas rutas GET locales. Sin migración, paquetes ni
+configuración nueva; actualizar binario y reiniciar para incorporarlas. Se conservan
+admisión 6, inspección 6/6 MiB/10 s, ActivityTimeout 15 s y deadline de headers
+opt-in desactivado. No se realizó despliegue ni se autoriza producción.
+
 ### Deadline opcional hasta headers upstream (local)
 
 `UpstreamHeadersDeadline:TimeoutSeconds` es un entero nullable **desactivado por
@@ -262,6 +292,13 @@ Tampoco garantiza que otros listeners reciban una medición si uno de ellos lanz
 dentro de la misma publicación. Los gauges observables conservan su contrato.
 
 ## Carga y memoria local (MVP-05)
+
+El nuevo modo separado `compare` mide passthrough frente a PAN/Mask con procesos
+aislados, p50/p95/p99, CPU, asignaciones y memoria muestreada. Su primera
+[comparación local MVP-18](evidence/mvp18/2026-10-20-local-summary.md) validó
+1024 respuestas en dos parejas AB/BA y mostró un coste importante para el payload
+sintético denso de 1 MiB. Es observacional: no acredita SLA ni sizing y no cambia
+límites operativos. Los comandos y esquemas históricos permanecen separados.
 
 Revalidación posterior a los cambios locales de resiliencia:
 [MVP-16, 19 de octubre de 2026](evidence/mvp16/2026-10-19-local-summary.md).

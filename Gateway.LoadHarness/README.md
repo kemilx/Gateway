@@ -1,4 +1,4 @@
-# Gateway.LoadHarness — MVP-05, MVP-06, MVP-07 y MVP-08
+# Gateway.LoadHarness — MVP-05 a MVP-08 y comparación RNF03 local
 
 Harness local y reproducible para medir carga y memoria del gateway con datos
 exclusivamente sintéticos. No es un benchmark de producción, no despliega servicios,
@@ -239,3 +239,106 @@ Un smoke no acredita sizing sostenido ni producción. No modifica defaults,
 infraestructura, esquemas de datos ni permisos; no hay publicación ni despliegue.
 Los reportes y stderr públicos no incorporan PID, nombres de Job, rutas,
 argumentos, direcciones, payloads ni mensajes de excepción.
+
+## RNF03: `compare`, comparación observacional separada
+
+```powershell
+dotnet build Gateway.LoadHarness/Gateway.LoadHarness.csproj -c Release --no-restore
+# Smoke mínimo; no ejecuta la carga predeterminada:
+dotnet Gateway.LoadHarness/bin/Release/net10.0/Gateway.LoadHarness.dll compare --output artifacts/mvp05/compare-NEW-smoke --requests-per-arm 8 --repetitions 1 --concurrency 1
+```
+
+`--output` es obligatorio: directorio **nuevo**, validado por `Common.OutputDirectory`
+antes de crear archivos o procesos. No se reutilizan directorios ni se sobrescriben
+reportes. Todas las opciones se validan antes de ejecutar. Enteros decimales estrictos:
+`--requests-per-arm` default 256, rango 8..4096; `--repetitions` default 2, rango
+1..4; `--concurrency` default 6, rango 1..6. La carga predeterminada se ejecutó una
+vez y fue verificada independientemente por QA el 20 de octubre de 2026:
+1024/1024 respuestas medidas validadas, cuatro brazos y dos parejas AB/BA.
+Véase el [resumen de evidencia](../evidence/mvp18/2026-10-20-local-summary.md).
+La aceptación de rendimiento de RNF-03 sigue sin evaluar; el smoke no la autoriza.
+
+Cada par alterna baseline/mask, mask/baseline, baseline/mask, mask/baseline (AB/BA).
+Cada brazo tiene API **nueva**, gateway **nuevo** y `HttpClient` **nuevo**, sin proxy
+ni descompresión automática. El padre es el proceso cliente; CPU/asignaciones solo
+proceden del proceso gateway. Baseline usa la ruta passthrough y mask la protegida,
+con el mismo cuerpo sintético de 1 MiB y los mismos headers de cliente. Antes de
+medir se completan dos oleadas de exactamente `concurrency` solicitudes. La latencia
+incluye consumir y validar **todo** el cuerpo contra bytes esperados en memoria,
+tanto baseline como mask; un 200 de longitud correcta no basta. No se guardan cuerpos.
+
+Ambos gateways reutilizan exactamente `IsolatedWorkers.Configure(..., 6)`:
+admisión 8, reserva 8 MiB, inspecciones 6, deadline de inspección 10 s y deadline
+de headers desactivado. **No equivale a defaults de aplicación 6/6 MiB** y no
+modifica configuración productiva. `memory`, `http`, `all`, `isolated`, `hard-limit`,
+sus protocolos y esquemas conservan su semántica.
+
+El worker interno `compare-gateway-worker` usa un protocolo JSON-lines propio
+`gateway.rnf03.compare-worker.v1`: ready (handshake versionado), warmup del cliente,
+begin con conteo esperado de warmups, carga del cliente, end con N esperado, stop.
+El API usa su protocolo histórico. Orden incorrecto, EOF, versión o cuerpo inválido
+y timeout fallan; no se recupera una ejecución parcial como éxito. Begin exige
+admisión y presupuesto 0/0, outcomes/duraciones exactamente 0/0 para baseline o
+`2*concurrency` para mask. End espera cleanup y exige deltas 0/0 o N/N.
+El stop versionado detiene la aplicación antes del ack. El ack por sí solo no
+acredita cleanup: Child.FinishStop exige salida del proceso con código cero y
+drain de stderr, con deadline de 15 s. Solo entonces se puede validar el brazo.
+Si la salida no es limpia, se invalida el brazo/par y la ejecución falla; el
+disposal mata el árbol si sigue vivo, sin enviar un stop plaintext histórico
+después del ack versionado. `Stop` histórico conserva su wire y validación.
+La infraestructura Child
+existente drena stderr y dispone procesos con timeouts y kill-tree de recuperación;
+un fallo de cleanup invalida el brazo. No hay Job ni nuevo actor/controlador.
+Límites: global 10 min, brazo 2 min, protocolo/HTTP 30 s, settle 5 s,
+stop de aplicación 10 s; recuperación Child: stop 3 s y salida/drain 10 s.
+
+El stdin del worker compare usa un único pump de hilo background con ownership
+de proceso, canal acotado a una línea y buffer de entrada de 16 KiB. Se rechaza
+el byte 16385 antes de materializar/decodear la línea; UTF-8 inválido falla.
+No se presupone que el pipe anónimo cancele un Read nativo. El deadline de 30 s
+cancela la espera del canal y es terminal: no se permite otra lectura/sesión.
+El cleanup no hace Join ni Dispose síncrono del lector bloqueado; la salida
+no-cero del worker tras cleanup acotado cierra la última lectura nativa pendiente.
+Es un fallback **de alcance de proceso**, no un lector reutilizable en servidores.
+No hay Task.Run por lectura ni múltiples lectores abandonados. Un test mantiene
+stdin redirigido abierto sin newline y verifica terminación no-cero bajo watchdog;
+otro caso envía una línea sobredimensionada sin newline.
+
+La ventana gateway usa reloj monotónico, `Process.TotalProcessorTime` y
+`GC.GetTotalAllocatedBytes(true)` (preciso, **no** fuerza GC). Incluye sampler,
+protocolo y runtime, pero excluye API y cliente. El sampler de 10 ms registra máximos
+independientes de managed, working set, private bytes, admisión, inspecciones y
+reserva; también contadores GC. Comienza en begin y termina tras cleanup de end,
+sin borrar memoria retenida del warmup. La ventana cliente difiere: cubre solo la
+carga con validación completa. Ambas duraciones se reportan explícitamente. Los
+picos muestreados pueden omitir transitorios; no son límites de SO ni sizing.
+
+`compare.json` y `compare.md` son nuevos, esquema `gateway.rnf03.compare.v1`,
+clasificación fija `LOCAL_OBSERVATIONAL_COMPARISON`, status `completed|failed`,
+`performanceAcceptance=not_evaluated` y target de memoria null. `exit 0` acredita
+solo validación y ejecución completa, **nunca SLA ni aprobación de RNF03**.
+Las métricas ausentes quedan null; las observaciones parciales no se agregan.
+Cada campo de la ventana y de sus picos/contadores GC es obligatorio en el JSON
+del worker y debe tener su tipo correcto. Una omisión, null inválido o tipo erróneo
+produce `metrics_invalid`, deja `arm.Gateway=null` e invalida el brazo; no se aceptan
+ceros por defecto de deserialización.
+Percentiles p50/p95/p99 nearest-rank: ordenar y tomar `ceil(q*n)-1`; throughput
+N/segundos de cliente, CPU ms y asignaciones por solicitud validada. Valores
+negativos/no finitos invalidan mediciones. Por par válido: delta mask-baseline y
+porcentaje `100*delta/baseline` (null con baseline cero). Los agregados son medianas
+de deltas de pares válidos, **no** percentiles globales ni diferencias de medianas
+de brazos. Si falta algún porcentaje, su mediana queda null.
+
+Se atribuyen revisión compilada, hashes SHA256 de los tres assemblies compilados,
+build configuration, runtime, SO genérico, arquitectura, cantidad de procesadores y
+modo GC. Los hashes distinguen binarios WIP de un commit base sin atribuir cambios
+sin commit a ese commit. No se serializan identificadores de procesos, rutas,
+hostname, direcciones, headers, argumentos, excepciones, selectores ni datos de
+cuerpo. Los códigos de fallo son fijos: worker_start_failed, warmup_failed,
+load_failed, protocol_invalid, protocol_eof, body_invalid, telemetry_invalid,
+metrics_invalid, cleanup_failed, timeout y not_run (brazo no iniciado).
+
+Pruebas: `dotnet test Gateway.Tests/Gateway.Tests.csproj -c Release --filter FullyQualifiedName~CompareHarnessTests`.
+Incluyen un solo par real de 8 solicitudes por brazo, matemáticas, aislamiento de
+telemetría, protocolo, cuerpo, timeout, terminación de worker y privacidad.
+No hay migración, despliegue ni cambio de contrato API productivo.
