@@ -181,6 +181,19 @@ public sealed class PanResponseTransform
             deadline.Check();
             return true;
         }
+        if (policy.Segments[segment] == "[*]")
+        {
+            if (value.ValueKind != JsonValueKind.Array) { CopyElement(value, writer, deadline); return false; }
+            var arrayChanged = false;
+            writer.WriteStartArray();
+            foreach (var element in value.EnumerateArray())
+            {
+                deadline.Check();
+                arrayChanged |= WriteSelected(element, writer, policy, segment + 1, deadline);
+            }
+            writer.WriteEndArray();
+            return arrayChanged;
+        }
         if (value.ValueKind != JsonValueKind.Object) { CopyElement(value, writer, deadline); return false; }
         var changed = false;
         writer.WriteStartObject();

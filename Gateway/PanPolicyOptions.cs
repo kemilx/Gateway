@@ -50,7 +50,8 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
     // Operational ceilings bound buffering and configuration cardinality; not PAN business rules.
     public const int MaximumBodyBytes = 16 * 1024 * 1024;
     private static readonly Regex Identifier = new(@"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z", RegexOptions.CultureInvariant);
-    private static readonly Regex Selector = new(@"\A\$(?:\.[A-Za-z_][A-Za-z0-9_]{0,63}){1,16}\z", RegexOptions.CultureInvariant);
+    // Each property or array wildcard consumes one traversal step; retain the existing ceilings.
+    private static readonly Regex Selector = new(@"\A\$(?:\.[A-Za-z_][A-Za-z0-9_]{0,63}|\[\*\]){1,16}\z", RegexOptions.CultureInvariant);
 
     public ValidateOptionsResult Validate(string? name, PanPolicyOptions options)
     {
@@ -73,7 +74,7 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
                 || !SafeSelector(policy.Selector)
                 || policy.MaxBodyBytes is <= 0 or > MaximumBodyBytes
                 || policy.MaxBodyBytes > options.InspectionBudget.MaxReservedBodyBytes)
-                return ValidateOptionsResult.Fail("Invalid PAN policy: check identifiers, unique existing RouteId, exact Mask mode, object selector and body limit.");
+                return ValidateOptionsResult.Fail("Invalid PAN policy: check identifiers, unique existing RouteId, exact Mask mode, property/array selector and body limit.");
         }
 
         var contract = options.CoverageContract;
@@ -86,7 +87,7 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
             if (requirement is null || !SafeIdentifier(requirement.RouteId)
                 || !knownRouteIds.Contains(requirement.RouteId) || !requiredRoutes.Add(requirement.RouteId)
                 || !SafeSelector(requirement.Selector))
-                return ValidateOptionsResult.Fail("Invalid PAN coverage requirement: check unique existing RouteId and object selector.");
+                return ValidateOptionsResult.Fail("Invalid PAN coverage requirement: check unique existing RouteId and property/array selector.");
 
             if (!options.Policies.Any(policy => string.Equals(policy.RouteId, requirement.RouteId, StringComparison.Ordinal)
                 && string.Equals(policy.Selector, requirement.Selector, StringComparison.Ordinal)))
@@ -107,7 +108,9 @@ public sealed class PanPolicyCatalog(IOptions<PanPolicyOptions> options)
 {
     private readonly FrozenDictionary<string, CompiledPanPolicy> policies = options.Value.Policies
         .Select(p => new CompiledPanPolicy(p.PolicyId, p.Version, p.RouteId,
-            p.Selector[2..].Split('.').ToImmutableArray(), p.MaxBodyBytes))
+            // Validated grammar: [*] is a reserved array step, never a property identifier.
+            Regex.Matches(p.Selector, @"[A-Za-z_][A-Za-z0-9_]*|\[\*\]")
+                .Select(match => match.Value).ToImmutableArray(), p.MaxBodyBytes))
         .ToFrozenDictionary(p => p.RouteId, StringComparer.Ordinal);
 
     public CompiledPanPolicy? Find(string routeId) => policies.GetValueOrDefault(routeId);
