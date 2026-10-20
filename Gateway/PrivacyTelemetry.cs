@@ -11,7 +11,8 @@ public enum PrivacyInspectionOutcome
     Canceled,
     WriteError,
     Faulted,
-    TimedOut
+    TimedOut,
+    PolicyBlocked
 }
 
 public sealed class PrivacyTelemetry : IDisposable
@@ -99,6 +100,7 @@ public sealed class PrivacyTelemetry : IDisposable
         PrivacyInspectionOutcome.WriteError => "write_error",
         PrivacyInspectionOutcome.Faulted => "faulted",
         PrivacyInspectionOutcome.TimedOut => "timed_out",
+        PrivacyInspectionOutcome.PolicyBlocked => "policy_blocked",
         _ => throw new ArgumentOutOfRangeException(nameof(outcome))
     };
 

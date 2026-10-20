@@ -138,13 +138,15 @@ public sealed class PrivacyTelemetryTests
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
-    [Fact]
-    public async Task Diagnostic_checkpoint_cancellation_records_canceled_and_releases_lease()
+    [Theory]
+    [InlineData("Mask")]
+    [InlineData("Block")]
+    public async Task Diagnostic_checkpoint_cancellation_records_canceled_and_releases_lease(string mode)
     {
         using var metrics = new MetricCollector();
         var budget = Budget(maxConcurrent: 1, maxBytes: ReservedBodyBytes);
         using var telemetry = new PrivacyTelemetry(budget);
-        var policy = Policy("TelemetryCheckpointCanceled");
+        var policy = Policy("TelemetryCheckpointCanceled") with { Mode = mode };
         using var cancellation = new CancellationTokenSource();
         var checkpointEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var downstream = new ControlledWriteStream();
@@ -168,13 +170,15 @@ public sealed class PrivacyTelemetryTests
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
-    [Fact]
-    public async Task Diagnostic_checkpoint_exception_records_faulted_and_releases_lease()
+    [Theory]
+    [InlineData("Mask")]
+    [InlineData("Block")]
+    public async Task Diagnostic_checkpoint_exception_records_faulted_and_releases_lease(string mode)
     {
         using var metrics = new MetricCollector();
         var budget = Budget(maxConcurrent: 1, maxBytes: ReservedBodyBytes);
         using var telemetry = new PrivacyTelemetry(budget);
-        var policy = Policy("TelemetryCheckpointFaulted");
+        var policy = Policy("TelemetryCheckpointFaulted") with { Mode = mode };
         var failure = new InvalidOperationException("Synthetic diagnostic checkpoint failure.");
         using var downstream = new ControlledWriteStream();
         using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream,
@@ -231,13 +235,15 @@ public sealed class PrivacyTelemetryTests
         AssertOutcomeAndDuration(metrics, writeError, "write_error");
     }
 
-    [Fact]
-    public async Task Cancellation_during_upstream_read_records_canceled_outcome()
+    [Theory]
+    [InlineData("Mask")]
+    [InlineData("Block")]
+    public async Task Cancellation_during_upstream_read_records_canceled_outcome(string mode)
     {
         using var metrics = new MetricCollector();
         var budget = Budget(maxConcurrent: 1, maxBytes: ReservedBodyBytes);
         using var telemetry = new PrivacyTelemetry(budget);
-        var policy = Policy("TelemetryReadCanceled");
+        var policy = Policy("TelemetryReadCanceled") with { Mode = mode };
         using var cancellation = new CancellationTokenSource();
         using var source = new BlockingReadStream();
         using var content = new StreamContent(source);
@@ -325,8 +331,10 @@ public sealed class PrivacyTelemetryTests
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
-    [Fact]
-    public async Task Head_bodyless_and_non_json_responses_emit_no_outcomes()
+    [Theory]
+    [InlineData("Mask")]
+    [InlineData("Block")]
+    public async Task Head_bodyless_and_non_json_responses_emit_no_outcomes(string mode)
     {
         using var metrics = new MetricCollector();
         var budget = Budget(maxConcurrent: 1, maxBytes: ReservedBodyBytes);
@@ -342,7 +350,7 @@ public sealed class PrivacyTelemetryTests
         foreach (var (policy, method, status, mediaType) in scenarios)
         {
             using var downstream = new MemoryStream();
-            using var invocation = Invocation(telemetry, policy, Content(JsonBody, mediaType), downstream,
+            using var invocation = Invocation(telemetry, policy with { Mode = mode }, Content(JsonBody, mediaType), downstream,
                 method: method, statusCode: status);
             await invocation.ApplyAsync();
             Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
@@ -390,13 +398,17 @@ public sealed class PrivacyTelemetryTests
     }
 
     [Theory]
-    [InlineData(Outcomes, false)]
-    [InlineData(Duration, false)]
-    [InlineData(Outcomes, true)]
-    [InlineData(Duration, true)]
-    public async Task Throwing_listener_preserves_masked_or_blocked_HTTP_response(string instrument, bool blocked)
+    [InlineData(Outcomes, false, "Mask")]
+    [InlineData(Duration, false, "Mask")]
+    [InlineData(Outcomes, true, "Mask")]
+    [InlineData(Duration, true, "Mask")]
+    [InlineData(Outcomes, false, "Block")]
+    [InlineData(Duration, false, "Block")]
+    [InlineData(Outcomes, true, "Block")]
+    [InlineData(Duration, true, "Block")]
+    public async Task Throwing_listener_preserves_masked_or_blocked_HTTP_response(string instrument, bool blocked, string mode)
     {
-        var policy = Policy("TelemetryThrowingHttp");
+        var policy = Policy("TelemetryThrowingHttp") with { Mode = mode };
         using var metrics = new MetricCollector(instrument, policy.PolicyId);
         var budget = Budget(1, ReservedBodyBytes);
         using var telemetry = new PrivacyTelemetry(budget);
@@ -405,11 +417,12 @@ public sealed class PrivacyTelemetryTests
 
         await invocation.ApplyAsync();
 
-        Assert.Equal(blocked ? StatusCodes.Status502BadGateway : StatusCodes.Status200OK,
+        Assert.Equal(blocked || mode == "Block" ? StatusCodes.Status502BadGateway : StatusCodes.Status200OK,
             invocation.Context.HttpContext.Response.StatusCode);
         Assert.Equal(blocked ? "{\"code\":\"privacy_inspection_failed\"}"
+            : mode == "Block" ? "{\"code\":\"privacy_response_blocked\"}"
             : "{\"payment\":{\"cardNumber\":\"************1111\"}}", Encoding.UTF8.GetString(downstream.ToArray()));
-        AssertOutcomeAndDuration(metrics, policy, blocked ? "blocked" : "inspected");
+        AssertOutcomeAndDuration(metrics, policy, blocked ? "blocked" : mode == "Block" ? "policy_blocked" : "inspected");
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -558,6 +571,121 @@ public sealed class PrivacyTelemetryTests
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
+    [Theory]
+    [InlineData("match", "policy_blocked")]
+    [InlineData("null", "inspected")]
+    [InlineData("missing", "inspected")]
+    [InlineData("invalid-json", "blocked")]
+    [InlineData("invalid-terminal", "blocked")]
+    public async Task Block_records_distinct_terminal_outcomes_with_unchanged_metric_contract(string scenario, string outcome)
+    {
+        var body = scenario switch
+        {
+            "match" => JsonBody,
+            "null" => "{ \"payment\" : {\"cardNumber\":null} }\n",
+            "missing" => "{ \"other\" : \"4111111111111111\" }\n",
+            "invalid-json" => JsonBody + "invalid",
+            "invalid-terminal" => "{\"payment\":{\"cardNumber\":\"selected\",\"cardNumber\":42}}",
+            _ => throw new ArgumentException(nameof(scenario))
+        };
+        var policy = Policy("TelemetryBlockContract") with { Mode = "Block" };
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(body), downstream);
+        await invocation.ApplyAsync();
+        Assert.Equal(outcome == "inspected" ? 200 : 502, invocation.Context.HttpContext.Response.StatusCode);
+        Assert.Equal(outcome == "inspected" ? body : outcome == "blocked"
+            ? "{\"code\":\"privacy_inspection_failed\"}" : "{\"code\":\"privacy_response_blocked\"}",
+            Encoding.UTF8.GetString(downstream.ToArray()));
+        AssertOutcomeAndDuration(metrics, policy, outcome);
+        Assert.Equal((0, 0L), budget.Snapshot);
+        Assert.Equal(6, (int)PrivacyInspectionOutcome.TimedOut);
+        Assert.Equal(7, (int)PrivacyInspectionOutcome.PolicyBlocked);
+    }
+
+    [Theory]
+    [InlineData("policy_blocked")]
+    [InlineData("canceled")]
+    [InlineData("timed_out")]
+    [InlineData("write_error")]
+    public async Task Block_write_holds_reservation_until_real_completion_and_terminal_error_wins(string outcome)
+    {
+        var policy = Policy("TelemetryBlockWrite") with { Mode = "Block" };
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        using var cancellation = new CancellationTokenSource();
+        using var downstream = new ControlledWriteStream(cooperative: false);
+        var clock = new ManualBlockClock();
+        using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream,
+            cancellation.Token, clock: clock);
+        var admission = new ProxyAdmission(Options.Create(new ProxyAdmissionOptions { MaxConcurrentProxyRequests = 1 }));
+        invocation.Context.HttpContext.SetEndpoint(new Endpoint(_ => Task.CompletedTask,
+            new EndpointMetadataCollection(new Yarp.ReverseProxy.Model.RouteModel(
+                new Yarp.ReverseProxy.Configuration.RouteConfig { RouteId = policy.RouteId }, null!,
+                Yarp.ReverseProxy.Forwarder.HttpTransformer.Default)), "proxy"));
+        var pending = new ProxyAdmissionMiddleware(_ => invocation.ApplyAsync())
+            .InvokeAsync(invocation.Context.HttpContext, admission);
+        await downstream.WriteStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("{\"code\":\"privacy_response_blocked\"}", downstream.AttemptedBody);
+        if (outcome == "canceled") cancellation.Cancel();
+        if (outcome == "timed_out") clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.False(pending.IsCompleted);
+        Assert.Equal((1, (long)ReservedBodyBytes), budget.Snapshot);
+        Assert.Equal(1, admission.ActiveRequests);
+        Assert.Null(admission.TryAcquire());
+        Assert.Null(budget.TryAcquire(ReservedBodyBytes));
+        Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
+        var failure = new IOException("Synthetic block downstream failure.");
+        if (outcome == "write_error") downstream.Fail(failure);
+        else downstream.Complete();
+        if (outcome is "canceled" or "timed_out")
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(TimeSpan.FromSeconds(5)));
+        else if (outcome == "write_error")
+            Assert.Same(failure, await Assert.ThrowsAsync<IOException>(() => pending.WaitAsync(TimeSpan.FromSeconds(5))));
+        else await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        AssertOutcomeAndDuration(metrics, policy, outcome);
+        Assert.Equal((0, 0L), budget.Snapshot);
+        Assert.Equal(0, admission.ActiveRequests);
+        using var proxyRecovered = admission.TryAcquire();
+        Assert.NotNull(proxyRecovered);
+        using var recovered = budget.TryAcquire(ReservedBodyBytes);
+        Assert.NotNull(recovered);
+    }
+
+    // Same manual monotonic/timer pattern as InspectionDeadlineTests; no wall-clock timeout races.
+    private sealed class ManualBlockClock : TimeProvider
+    {
+        private long ticks;
+        private readonly List<ManualTimer> timers = [];
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => Interlocked.Read(ref ticks);
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new ManualTimer(this, callback, state);
+            timers.Add(timer);
+            timer.Change(dueTime, period);
+            return timer;
+        }
+        public void Advance(TimeSpan elapsed)
+        {
+            Interlocked.Add(ref ticks, elapsed.Ticks);
+            foreach (var timer in timers.ToArray()) timer.Fire();
+        }
+        private sealed class ManualTimer(ManualBlockClock clock, TimerCallback callback, object? state) : ITimer
+        {
+            private long due = long.MaxValue;
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            { due = dueTime == Timeout.InfiniteTimeSpan ? long.MaxValue : clock.ticks + dueTime.Ticks; return true; }
+            public void Fire() { if (clock.ticks < due) return; due = long.MaxValue; callback(state); }
+            public void Dispose() => due = long.MaxValue;
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
+    }
+
     private static void AssertOutcomeAndDuration(MetricCollector metrics, CompiledPanPolicy policy,
         string expectedOutcome)
     {
@@ -566,6 +694,7 @@ public sealed class PrivacyTelemetryTests
         Assert.Same(outcome.Meter, duration.Meter);
         Assert.Equal("ms", duration.Unit);
         Assert.Equal(expectedOutcome, duration.Tags["gateway.privacy.outcome"]);
+        Assert.Equal(outcome.Tags.OrderBy(tag => tag.Key), duration.Tags.OrderBy(tag => tag.Key));
         Assert.True(duration.Value >= 0);
     }
 
@@ -609,7 +738,7 @@ public sealed class PrivacyTelemetryTests
     private static TransformInvocation Invocation(PrivacyTelemetry telemetry, CompiledPanPolicy policy,
         HttpContent content, Stream downstream, CancellationToken cancellationToken = default,
         string method = "GET", HttpStatusCode statusCode = HttpStatusCode.OK,
-        Func<CancellationToken, ValueTask>? diagnosticCheckpoint = null)
+        Func<CancellationToken, ValueTask>? diagnosticCheckpoint = null, TimeProvider? clock = null)
     {
         var httpContext = new DefaultHttpContext();
         httpContext.Request.Method = method;
@@ -623,9 +752,7 @@ public sealed class PrivacyTelemetryTests
             HeadersCopied = true,
             CancellationToken = cancellationToken
         };
-        var transform = diagnosticCheckpoint is null
-            ? new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, telemetry)
-            : new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, telemetry, diagnosticCheckpoint);
+        var transform = new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, telemetry, diagnosticCheckpoint, clock);
         return new TransformInvocation(transform, policy, context, proxyResponse);
     }
 
@@ -703,12 +830,13 @@ public sealed class PrivacyTelemetryTests
     private sealed record CapturedMeasurement(string InstrumentName, string? Unit, double Value,
         IReadOnlyDictionary<string, string?> Tags, Meter Meter);
 
-    private sealed class ControlledWriteStream : Stream
+    private sealed class ControlledWriteStream(bool cooperative = true) : Stream
     {
         private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource writeStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public Task WriteStarted => writeStarted.Task;
+        public string? AttemptedBody { get; private set; }
         public override bool CanRead => false;
         public override bool CanSeek => false;
         public override bool CanWrite => true;
@@ -721,8 +849,11 @@ public sealed class PrivacyTelemetryTests
         public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer,
             CancellationToken cancellationToken = default)
         {
+            AttemptedBody = Encoding.UTF8.GetString(buffer.Span);
             writeStarted.TrySetResult();
-            await release.Task.WaitAsync(cancellationToken);
+            if (cooperative) await release.Task.WaitAsync(cancellationToken);
+            else await release.Task;
+            cancellationToken.ThrowIfCancellationRequested();
         }
 
         public override void Flush() { }

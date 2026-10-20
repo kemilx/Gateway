@@ -1,4 +1,4 @@
-# MVP-02.1 — política PAN configurable y cobertura mínima
+# MVP-20 — RF07 Block y política PAN configurable
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -164,12 +164,46 @@ nuevo. No hay migraciones, paquetes nuevos ni despliegue realizado.
 ```
 
 - Options nativo enlaza tipos y aplica `ValidateOnStart`. Se exige entre 1 y 32 políticas; sección ausente, lista vacía o configuración inválida impiden arrancar/servir tráfico. YARP también valida al compilar sus transforms durante `Build`, antes de abrir el listener. Campos desconocidos se rechazan.
-- `PolicyId`, `Version` y `RouteId`: 1–64 caracteres ASCII, patrón `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; RouteId único con comparación ordinal y existente en el mismo conjunto de RouteConfig entregado a YARP (`protected-payment` o `passthrough` en esta demo). Una ruta inexistente impide Build/Start, nunca queda una política silenciosamente sin usar. `Mode` es obligatorio y acepta exclusivamente el texto exacto `Mask`; números, distinta capitalización, espacios y vacío se rechazan. IDs/versiones acotados evitan inyección en logs y cardinalidad ilimitada durante el proceso.
-- Selector estructural acotado (no JSONPath completo): `$` seguido de 1 a 16 pasos, cada uno una propiedad `.[A-Za-z_][A-Za-z0-9_]{0,63}` o comodín de array `[*]` explícito; máximo total 1041 caracteres. Se conservan los límites operativos anteriores, contando cada comodín como un paso. Ejemplos: `$.payment.cardNumber`, `$.payments[*].cardNumber`, `$.cards[*]`, `$.groups[*][*].cardNumber` y `$[*].cardNumber` para array raíz. Sin índices, filtros, descenso recursivo, comodín de propiedades, comillas ni escapes. Comparación ordinal case-sensitive; se visitan todos los duplicados y todos los elementos de arrays seleccionados. Un paso de propiedad solo recorre objetos y `[*]` solo arrays: otro tipo antes del terminal no coincide y se conserva. Arrays vacíos no cambian. Terminal `null` pasa; string usa Mask existente; otro tipo terminal falla cerrado para toda la respuesta, sin publicar una transformación parcial. Se comprueba cancelación/deadline por elemento; no cambia la reserva ni concurrencia.
+- `PolicyId`, `Version` y `RouteId`: 1–64 caracteres ASCII, patrón `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; RouteId único con comparación ordinal y existente en el mismo conjunto de RouteConfig entregado a YARP (`protected-payment` o `passthrough` en esta demo). Una ruta inexistente impide Build/Start, nunca queda una política silenciosamente sin usar. `Mode` es obligatorio y acepta exclusivamente los textos exactos `Mask` y `Block`; números, distinta capitalización, espacios y vacío se rechazan. IDs/versiones acotados evitan inyección en logs y cardinalidad ilimitada durante el proceso.
+- Selector estructural acotado (no JSONPath completo): `$` seguido de 1 a 16 pasos, cada uno una propiedad `.[A-Za-z_][A-Za-z0-9_]{0,63}` o comodín de array `[*]` explícito; máximo total 1041 caracteres. Se conservan los límites operativos anteriores, contando cada comodín como un paso. Ejemplos: `$.payment.cardNumber`, `$.payments[*].cardNumber`, `$.cards[*]`, `$.groups[*][*].cardNumber` y `$[*].cardNumber` para array raíz. Sin índices, filtros, descenso recursivo, comodín de propiedades, comillas ni escapes. Comparación ordinal case-sensitive; se visitan todos los duplicados y todos los elementos de arrays seleccionados. Un paso de propiedad solo recorre objetos y `[*]` solo arrays: otro tipo antes del terminal no coincide y se conserva. Arrays vacíos no cambian. Terminal `null` pasa; string aplica Mask o Block según Mode; otro tipo terminal falla cerrado para toda la respuesta, sin publicar una transformación parcial. Se comprueba cancelación/deadline por elemento; no cambia la reserva ni concurrencia.
 - `CoverageContract` es obligatorio: `Version` usa el mismo formato seguro de identificadores y `Required` contiene entre 1 y 32 pares RouteId/Selector. Cada RouteId debe ser conocido y único dentro del contrato, y cada selector usa la gramática anterior. Cada par debe coincidir **exactamente (ordinal, case-sensitive)** con una política efectiva. Cambiar solo ruta o selector, omitir cobertura, duplicar requisitos o configurar un contrato inválido impide Build/Start. Es cobertura **mínima**: pueden existir políticas adicionales válidas, pero no sustituyen requisitos. La versión identifica el contrato; no debe coincidir necesariamente con la versión de cada política.
 - El contrato detecta desviaciones de las políticas respecto a una cobertura declarada, no descubre dónde existe PAN. **Cambiar conjuntamente política y contrato es un cambio de seguridad que requiere revisión** (y versionado explícito del contrato). No protege frente a quien controla ambos archivos/configuración o sus sobrescrituras: ese control está dentro del límite de confianza. El valor distribuido exige `protected-payment` + `$.payment.cardNumber`; migrar configuraciones anteriores requiere añadir explícitamente el contrato antes de iniciar esta versión.
 - `MaxBodyBytes`: entero obligatorio de 1 a **16.777.216** bytes inclusive. El techo operativo de 16 MiB acota el buffering por respuesta; no constituye un presupuesto global de memoria ni cambia el valor aprobado por defecto de 1 MiB.
 - Catálogo inmutable por RouteId y selectores segmentados una sola vez al iniciar. **Sin BD ni reload dinámico de políticas**: `IOptions`, no monitor/snapshot; cambiar archivo/configuración requiere reiniciar. Las fuentes estándar de configuración .NET pueden sobrescribir valores antes del arranque, sujetos a la misma validación. Las rutas YARP de esta demo siguen definidas en código; cambiar RouteId asigna una política a una ruta, no crea rutas nuevas. Rutas sin política son passthrough.
+
+## RF07 Block (MVP-20, opt-in local)
+
+`Mode` admite exclusivamente los textos exactos `Mask` y `Block`. El default
+distribuido sigue siendo **Mask**, con versiones, cobertura, selector, presupuestos
+y límites intactos. `Block` bloquea ante **cualquier string seleccionado**, incluso
+vacío, corto o no-PAN: no es un detector ni aplica Luhn. `null` pasa; otro tipo
+terminal sigue siendo fallo de inspección. No hay modo Observe ni fail-open.
+
+Una coincidencia válida de Block devuelve **502** con JSON UTF-8
+`{"code":"privacy_response_blocked"}`, `Cache-Control: no-store` y sin headers
+upstream ni bytes originales/enmascarados. Se termina la captura, parseo y validación
+de todos los terminales antes de decidir: JSON inválido o un terminal inválido,
+incluso posterior a un string en arrays o duplicados, prevalece con
+`privacy_inspection_failed`. No se corta el recorrido al encontrar un string.
+Sin coincidencia o con solo null se conservan bytes y status originales. HEAD,
+204/304 y tipos excluidos conservan su semántica; Block **no protege passthrough
+ni non-JSON**. Cancelación, deadline y errores de escritura/internos no se
+convierten en bloqueos de política; leases y admisión duran hasta terminar el trabajo.
+
+Telemetría añade únicamente `policy_blocked` al listado cerrado de outcomes.
+`blocked` conserva su significado histórico de fallo de inspección; sin match
+se registra `inspected`. No cambian nombres, unidades ni tags; cada inspección
+admitida intenta publicar exactamente un outcome y una duración terminales,
+con precedencia de errores y aislamiento de consumidores existentes.
+
+Compatibilidad: actualizar primero consumidores que enumeren outcomes para aceptar
+`policy_blocked`, luego actualizar el binario y reiniciar; activar Block requiere
+cambiar explícitamente Mode. Para rollback, volver a Mask antes de usar un binario
+anterior (rechaza Block), conservando el label histórico en consumidores. Sin
+migraciones de BD, paquetes, reload, panel ni exporter nuevos; no se realizó despliegue.
+Las pruebas son sintéticas locales, no aceptación **RNF03**, aprobación de producto
+ni certificación/sizing de producción. Revisión independiente estática: **APPROVED**;
+build Release sin errores/advertencias y suite completa **384/384 PASS**, sin omitidos.
 
 ## Comportamiento por defecto (preservado de MVP-01)
 
@@ -262,7 +296,9 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
 | `gateway.privacy.inspection.reserved_body_bytes` | `ObservableGauge<long>` | `By` |
 
 - Los outcomes son únicamente `inspected`, `blocked`, `capacity_exceeded`,
-  `canceled`, `write_error`, `faulted` y `timed_out`. Cada operación JSON protegida que llega
+  `canceled`, `write_error`, `faulted`, `timed_out` y `policy_blocked`.
+  `blocked` significa fallo de inspección; `policy_blocked`, bloqueo por política Block.
+  Cada operación JSON protegida que llega
   al control de capacidad registra un solo outcome terminal. La duración se
   registra solo si se adquirió el lease; usa el timestamp conservador previo al
   intento de adquisición e incluye escritura downstream y cleanup (véase MVP-09).

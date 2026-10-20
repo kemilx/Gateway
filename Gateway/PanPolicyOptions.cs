@@ -70,11 +70,11 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
         {
             if (policy is null || !SafeIdentifier(policy.PolicyId) || !SafeIdentifier(policy.Version)
                 || !SafeIdentifier(policy.RouteId) || !knownRouteIds.Contains(policy.RouteId) || !routes.Add(policy.RouteId)
-                || !string.Equals(policy.Mode, "Mask", StringComparison.Ordinal)
+                || policy.Mode is not ("Mask" or "Block")
                 || !SafeSelector(policy.Selector)
                 || policy.MaxBodyBytes is <= 0 or > MaximumBodyBytes
                 || policy.MaxBodyBytes > options.InspectionBudget.MaxReservedBodyBytes)
-                return ValidateOptionsResult.Fail("Invalid PAN policy: check identifiers, unique existing RouteId, exact Mask mode, property/array selector and body limit.");
+                return ValidateOptionsResult.Fail("Invalid PAN policy: check identifiers, unique existing RouteId, exact Mask or Block mode, property/array selector and body limit.");
         }
 
         var contract = options.CoverageContract;
@@ -101,7 +101,10 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
 }
 
 public sealed record CompiledPanPolicy(string PolicyId, string Version, string RouteId,
-    ImmutableArray<string> Segments, int MaxBodyBytes);
+    ImmutableArray<string> Segments, int MaxBodyBytes)
+{
+    public string Mode { get; init; } = "Mask";
+}
 
 // IOptions (not IOptionsMonitor/Snapshot): bind once, then copy into immutable process-lifetime data.
 public sealed class PanPolicyCatalog(IOptions<PanPolicyOptions> options)
@@ -110,7 +113,7 @@ public sealed class PanPolicyCatalog(IOptions<PanPolicyOptions> options)
         .Select(p => new CompiledPanPolicy(p.PolicyId, p.Version, p.RouteId,
             // Validated grammar: [*] is a reserved array step, never a property identifier.
             Regex.Matches(p.Selector, @"[A-Za-z_][A-Za-z0-9_]*|\[\*\]")
-                .Select(match => match.Value).ToImmutableArray(), p.MaxBodyBytes))
+                .Select(match => match.Value).ToImmutableArray(), p.MaxBodyBytes) { Mode = p.Mode })
         .ToFrozenDictionary(p => p.RouteId, StringComparer.Ordinal);
 
     public CompiledPanPolicy? Find(string routeId) => policies.GetValueOrDefault(routeId);

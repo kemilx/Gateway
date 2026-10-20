@@ -9,6 +9,7 @@ namespace Gateway;
 public sealed class PanResponseTransform
 {
     private static readonly byte[] Failure = "{\"code\":\"privacy_inspection_failed\"}"u8.ToArray();
+    private static readonly byte[] PolicyBlocked = "{\"code\":\"privacy_response_blocked\"}"u8.ToArray();
     private static readonly byte[] CapacityFailure = "{\"code\":\"privacy_capacity_exceeded\"}"u8.ToArray();
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly ILogger<PanResponseTransform> logger;
@@ -110,7 +111,13 @@ public sealed class PanResponseTransform
                 using (var writer = new Utf8JsonWriter(transformed))
                     changed = WriteSelected(document.RootElement, writer, policy, 0, deadline);
                 deadline.Check();
-                output = changed ? transformed.ToArray() : captured.ToArray();
+                // A match is only a candidate block: finish validation and checkpoints first.
+                if (changed && policy.Mode == "Block")
+                {
+                    output = PolicyBlocked;
+                    completedOutcome = PrivacyInspectionOutcome.PolicyBlocked;
+                }
+                else output = changed ? transformed.ToArray() : captured.ToArray();
                 deadline.Check();
                 if (diagnosticCheckpoint is { } checkpoint)
                 {
@@ -119,8 +126,8 @@ public sealed class PanResponseTransform
                     deadline.Check();
                     diagnosticCheckpointRunning = false;
                 }
-                logger.LogInformation(new EventId(1, "Inspected"), "Protected response inspected; policy {PolicyId} version {Version} Mask.",
-                    policy.PolicyId, policy.Version);
+                logger.LogInformation(new EventId(1, "Inspected"), "Protected response inspected; policy {PolicyId} version {Version} {Mode}.",
+                    policy.PolicyId, policy.Version, policy.Mode);
             }
             catch (Exception ex) when (!diagnosticCheckpointRunning
                                        && ex is not OperationCanceledException and not OutOfMemoryException)
@@ -140,6 +147,12 @@ public sealed class PanResponseTransform
 
             deadline.PrepareResponse(() =>
             {
+                if (completedOutcome == PrivacyInspectionOutcome.PolicyBlocked)
+                {
+                    response.Headers.Clear();
+                    response.StatusCode = StatusCodes.Status502BadGateway;
+                    response.Headers.CacheControl = "no-store";
+                }
                 foreach (var header in new[] { "ETag", "Last-Modified", "Content-MD5", "Digest", "Content-Digest",
                          "Repr-Digest", "Signature", "Signature-Input", "Content-Encoding", "Content-Range", "Accept-Ranges", "Trailer", "Transfer-Encoding" })
                     response.Headers.Remove(header);
@@ -177,7 +190,9 @@ public sealed class PanResponseTransform
         {
             if (value.ValueKind == JsonValueKind.Null) { CopyElement(value, writer, deadline); return false; }
             if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
-            writer.WriteStringValue(Mask(value.GetString()!));
+            // Block selects every string, including empty/non-PAN; never mask it or stop traversal.
+            if (policy.Mode == "Block") writer.WriteNullValue();
+            else writer.WriteStringValue(Mask(value.GetString()!));
             deadline.Check();
             return true;
         }
