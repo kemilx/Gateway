@@ -101,6 +101,7 @@ public sealed class PanResponseTransform
 
                 // JsonDocument can retain invalid UTF-8 inside unvisited strings; validate all input bytes.
                 deadline.Check();
+                inspection.CapturedInputBodyBytes = captured.Length;
                 StrictUtf8.GetCharCount(captured.GetBuffer().AsSpan(0, (int)captured.Length));
                 deadline.Check();
                 using var document = JsonDocument.Parse(captured.GetBuffer().AsMemory(0, (int)captured.Length),

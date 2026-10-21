@@ -292,6 +292,7 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
 | --- | --- | --- |
 | `gateway.privacy.inspection.outcomes` | `Counter<long>` | `{inspection}` |
 | `gateway.privacy.inspection.duration` | `Histogram<double>` | `ms` |
+| `gateway.privacy.inspection.input_body_bytes` | `Histogram<long>` | `By` |
 | `gateway.privacy.inspection.active` | `ObservableGauge<int>` | `{inspection}` |
 | `gateway.privacy.inspection.reserved_body_bytes` | `ObservableGauge<long>` | `By` |
 
@@ -302,7 +303,7 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
   al control de capacidad registra un solo outcome terminal. La duración se
   registra solo si se adquirió el lease; usa el timestamp conservador previo al
   intento de adquisición e incluye escritura downstream y cleanup (véase MVP-09).
-- Counter e histograma usan exclusivamente los tags acotados
+- Counter e histogramas usan exclusivamente los tags acotados
   `gateway.route.id`, `gateway.policy.id`, `gateway.policy.version` y
   `gateway.privacy.outcome`; los gauges no añaden tags. Nunca se incluye cuerpo,
   PAN, selector, URL/query ni excepción.
@@ -312,11 +313,44 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
 Sigue siendo un MVP local con datos exclusivamente sintéticos y no está
 aprobado para producción.
 
+### Tamaño de entrada capturada completa (MVP-21, RF11 parcial)
+
+`gateway.privacy.inspection.input_body_bytes` mide bytes reales de entrada, no
+caracteres, Content-Length, salida, reserva ni hallazgos. Solo se marca la captura
+tras llegar a EOF dentro del límite y comprobar el deadline, antes de validar
+UTF-8, parsear JSON o recorrer terminales. EOF vacío registra **0** aunque luego
+falle JSON; **ausencia** de muestra significa que no se completó una captura elegible,
+no tamaño cero ni total inferido.
+
+Se intenta publicar una muestra terminal en `Complete`, junto al outcome y duración,
+con el mismo outcome final: `inspected`, `policy_blocked`, `blocked`, `canceled`,
+`timed_out`, `write_error` o `faulted`. Fallos posteriores a captura (incluidos
+UTF-8/JSON/terminal inválidos, cancelación y escritura) conservan la muestra.
+No se publica por capacidad, HEAD/204/304/non-JSON/rutas sin política, rechazo
+prelectura (charset, encoding, 206 o tamaño declarado), exceso real, lectura
+fallida/cancelada o deadline antes de completar captura. No es una distribución
+de todos los cuerpos recibidos: excluye deliberadamente capturas incompletas.
+
+Usa el mismo Meter y versión y exclusivamente las cuatro tags acotadas anteriores.
+Cada instrumento aísla errores ordinarios del consumidor de forma independiente;
+ninguno impide intentar los otros ni liberar el lease. La publicación es best
+effort, no atómica, y callbacks bloqueantes conservan las limitaciones de MVP-12.
+No hay callbacks de trabajo nuevos ni liberación anticipada de capacidad.
+
+Compatibilidad aditiva: sin cambiar instrumentos existentes, dependencias,
+configuración, defaults, límites o modos; sin migraciones. Los consumidores que
+filtren nombres pueden incorporar el nuevo histograma antes de actualizar binario
+y reiniciar; rollback simplemente deja de emitirlo. No se ejecutó despliegue,
+exporter ni campaña de sizing. MVP-21: build Release sin errores/advertencias,
+suite completa **410/410 PASS** sin omitidos y revisión independiente estática
+**APPROVED**. RF11 completo sigue pendiente; esto no acredita RNF03 ni aprobación
+del producto.
+
 ### Aislamiento de consumidores de métricas (MVP-12)
 
-La publicación del contador y del histograma es best effort e independiente:
+La publicación del contador y de los histogramas es best effort e independiente:
 una excepción ordinaria de un consumidor síncrono no cambia la respuesta HTTP,
-la cancelación ni el error original, y no impide intentar el otro instrumento.
+la cancelación ni el error original, y no impide intentar los demás instrumentos.
 Puede perderse parte de la telemetría; no hay atomicidad entre HTTP y métricas.
 Se conservan los nombres, tags, outcomes y la liberación del presupuesto.
 Los errores de validación propios y fallos graves como `OutOfMemoryException`

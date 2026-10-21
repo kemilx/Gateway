@@ -249,7 +249,8 @@ public sealed class InspectionDeadlineTests
         Assert.Equal((0, 0L), fixture.Budget.Snapshot);
         using var recovered = fixture.Budget.TryAcquire(1024);
         Assert.NotNull(recovered);
-        fixture.AssertMetrics("timed_out", phase == "cleanup" ? 1375 : 1000);
+        fixture.AssertMetrics("timed_out", phase == "cleanup" ? 1375 : 1000,
+            expectedInputBytes: phase == "read" ? null : Encoding.UTF8.GetByteCount(Json));
     }
 
     [Fact]
@@ -332,7 +333,8 @@ public sealed class InspectionDeadlineTests
             Assert.Empty(fixture.Output.ToArray());
         }
         else await pending;
-        fixture.AssertMetrics(expired ? "timed_out" : "inspected", milliseconds);
+        fixture.AssertMetrics(expired ? "timed_out" : "inspected", milliseconds,
+            expectedInputBytes: Encoding.UTF8.GetByteCount(Json));
     }
 
     [Theory]
@@ -346,7 +348,8 @@ public sealed class InspectionDeadlineTests
         Assert.Equal(0, fixture.Lifetime.Aborts);
         Assert.Equal(invalid ? 502 : 200, fixture.Context.HttpContext.Response.StatusCode);
         Assert.Equal(invalid ? "{\"code\":\"privacy_inspection_failed\"}" : Json.Replace("4111111111111111", "************1111"), Encoding.UTF8.GetString(fixture.Output.ToArray()));
-        fixture.AssertMetrics(invalid ? "blocked" : "inspected", 0);
+        fixture.AssertMetrics(invalid ? "blocked" : "inspected", 0,
+            expectedInputBytes: invalid ? 1 : Encoding.UTF8.GetByteCount(Json));
     }
 
     private sealed class Fixture : IDisposable
@@ -391,15 +394,28 @@ public sealed class InspectionDeadlineTests
         private void Record(Instrument instrument, double value, ReadOnlySpan<KeyValuePair<string, object?>> tags)
         {
             if (!tags.ToArray().Any(t => t.Key == "gateway.policy.id" && Equals(t.Value, policy.PolicyId))) return;
-            Metrics.Enqueue(new(instrument.Name, value, tags.ToArray()));
+            Metrics.Enqueue(new(instrument.Name, value, tags.ToArray(), instrument));
         }
 
         public Task Run() => transform.ApplyAsync(Context, policy).AsTask();
-        public void AssertMetrics(string outcome, double expectedMilliseconds = 1000)
+        public void AssertMetrics(string outcome, double expectedMilliseconds = 1000, long? expectedInputBytes = null)
         {
-            Assert.Equal(2, Metrics.Count);
+            Assert.Equal(expectedInputBytes.HasValue ? 3 : 2, Metrics.Count);
             Assert.Equal(1, Assert.Single(Metrics, m => m.Instrument == "gateway.privacy.inspection.outcomes" && m.Outcome == outcome).Value);
             Assert.Equal(expectedMilliseconds, Assert.Single(Metrics, m => m.Instrument == "gateway.privacy.inspection.duration" && m.Outcome == outcome).Value);
+            var sizes = Metrics.Where(m => m.Instrument == "gateway.privacy.inspection.input_body_bytes");
+            if (expectedInputBytes is { } bytes)
+            {
+                var size = Assert.Single(sizes);
+                Assert.Equal(bytes, size.Value);
+                Assert.IsType<Histogram<long>>(size.Source);
+                Assert.Equal("By", size.Source.Unit);
+                Assert.Equal("Gateway.Privacy", size.Source.Meter.Name);
+                Assert.Equal("1.0.0", size.Source.Meter.Version);
+                Assert.Same(Assert.Single(Metrics, m => m.Instrument == "gateway.privacy.inspection.outcomes").Source.Meter,
+                    size.Source.Meter);
+            }
+            else Assert.Empty(sizes);
             var expected = new Dictionary<string, object?>
             {
                 ["gateway.policy.id"] = policy.PolicyId,
@@ -413,7 +429,7 @@ public sealed class InspectionDeadlineTests
         public void Dispose() { Context.ProxyResponse?.Dispose(); telemetry.Dispose(); listener.Dispose(); Output.Dispose(); Stream.Dispose(); Lifetime.Source.Dispose(); }
     }
 
-    private sealed record Measurement(string Instrument, double Value, KeyValuePair<string, object?>[] Tags)
+    private sealed record Measurement(string Instrument, double Value, KeyValuePair<string, object?>[] Tags, Instrument Source)
     {
         public string Outcome => (string)Tags.Single(t => t.Key == "gateway.privacy.outcome").Value!;
     }

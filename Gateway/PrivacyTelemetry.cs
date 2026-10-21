@@ -25,6 +25,7 @@ public sealed class PrivacyTelemetry : IDisposable
     private readonly Meter meter = new(MeterName, MeterVersion);
     private readonly Counter<long> outcomes;
     private readonly Histogram<double> duration;
+    private readonly Histogram<long> inputBodyBytes;
     private readonly ObservableGauge<int> active;
     private readonly ObservableGauge<long> reservedBodyBytes;
 
@@ -33,6 +34,7 @@ public sealed class PrivacyTelemetry : IDisposable
         this.budget = budget;
         outcomes = meter.CreateCounter<long>("gateway.privacy.inspection.outcomes", "{inspection}");
         duration = meter.CreateHistogram<double>("gateway.privacy.inspection.duration", "ms");
+        inputBodyBytes = meter.CreateHistogram<long>("gateway.privacy.inspection.input_body_bytes", "By");
         active = meter.CreateObservableGauge<int>("gateway.privacy.inspection.active",
             () => budget.Snapshot.ActiveInspections, "{inspection}");
         reservedBodyBytes = meter.CreateObservableGauge<long>("gateway.privacy.inspection.reserved_body_bytes",
@@ -60,7 +62,7 @@ public sealed class PrivacyTelemetry : IDisposable
     public void Dispose() => meter.Dispose();
 
     private void RecordOutcome(CompiledPanPolicy policy, PrivacyInspectionOutcome outcome,
-        double? durationMilliseconds)
+        double? durationMilliseconds, long? capturedInputBodyBytes = null)
     {
         var tags = new TagList
         {
@@ -83,6 +85,15 @@ public sealed class PrivacyTelemetry : IDisposable
             try
             {
                 duration.Record(elapsed, tags);
+            }
+            catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
+        }
+
+        if (capturedInputBodyBytes is { } bytes)
+        {
+            try
+            {
+                inputBodyBytes.Record(bytes, tags);
             }
             catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
         }
@@ -112,6 +123,7 @@ public sealed class PrivacyTelemetry : IDisposable
         private readonly TimeProvider clock;
         internal long StartedAt { get; }
         private int completed;
+        internal long? CapturedInputBodyBytes { get; set; }
 
         internal InspectionMeasurement(PrivacyTelemetry telemetry, CompiledPanPolicy policy, IDisposable lease, TimeProvider clock, long startedAt)
         {
@@ -130,7 +142,8 @@ public sealed class PrivacyTelemetry : IDisposable
 
             try
             {
-                telemetry.RecordOutcome(policy, outcome, clock.GetElapsedTime(StartedAt).TotalMilliseconds);
+                telemetry.RecordOutcome(policy, outcome, clock.GetElapsedTime(StartedAt).TotalMilliseconds,
+                    CapturedInputBodyBytes);
             }
             finally
             {

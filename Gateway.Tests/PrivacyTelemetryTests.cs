@@ -25,8 +25,135 @@ public sealed class PrivacyTelemetryTests
     private const string JsonBody = "{\"payment\":{\"cardNumber\":\"4111111111111111\"}}";
     private const string Outcomes = "gateway.privacy.inspection.outcomes";
     private const string Duration = "gateway.privacy.inspection.duration";
+    private const string InputSize = "gateway.privacy.inspection.input_body_bytes";
     private const string Active = "gateway.privacy.inspection.active";
     private const string Reserved = "gateway.privacy.inspection.reserved_body_bytes";
+
+    [Theory]
+    [InlineData("Mask", "{\"payment\":{\"cardNumber\":\"é😀\"}}", "inspected")]
+    [InlineData("Block", "{\"payment\":{\"cardNumber\":\"é😀\"}}", "policy_blocked")]
+    [InlineData("Mask", "{\"other\":\"é😀\"}", "inspected")]
+    [InlineData("Block", "{\"other\":\"é😀\"}", "inspected")]
+    [InlineData("Mask", "", "blocked")]
+    [InlineData("Block", "", "blocked")]
+    [InlineData("Mask", "{INVALID", "blocked")]
+    [InlineData("Mask", "{\"payment\":{\"cardNumber\":\"selected\",\"cardNumber\":42}}", "blocked")]
+    public async Task Complete_capture_records_real_UTF8_bytes_including_empty_with_final_outcome(string mode, string body, string outcome)
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("InputSizeComplete") with { Mode = mode };
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(body), downstream);
+        await invocation.ApplyAsync();
+        Assert.Equal(outcome == "inspected" ? 200 : 502, invocation.Context.HttpContext.Response.StatusCode);
+        AssertOutcomeAndDuration(metrics, policy, outcome);
+        AssertInputSize(metrics, policy, outcome, Encoding.UTF8.GetByteCount(body));
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData("charset")]
+    [InlineData("encoding")]
+    [InlineData("declared-size")]
+    [InlineData("partial-status")]
+    [InlineData("oversize")]
+    [InlineData("read-error")]
+    [InlineData("pre-read-error")]
+    public async Task Incomplete_capture_and_preflight_rejection_emit_no_size(string scenario)
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("InputSizeIncomplete");
+        using var source = new FragmentedInputStream(
+            Encoding.UTF8.GetBytes(scenario == "oversize" ? new string('x', ReservedBodyBytes + 1) : JsonBody),
+            scenario == "read-error" ? 1 : scenario == "pre-read-error" ? 0 : null);
+        using var content = new StreamContent(source);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        if (scenario == "charset") content.Headers.ContentType.CharSet = "utf-16";
+        if (scenario == "encoding") content.Headers.ContentEncoding.Add("gzip");
+        if (scenario == "declared-size") content.Headers.ContentLength = ReservedBodyBytes + 1;
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, content, downstream,
+            statusCode: scenario == "partial-status" ? HttpStatusCode.PartialContent : HttpStatusCode.OK);
+        await invocation.ApplyAsync();
+        Assert.Equal(502, invocation.Context.HttpContext.Response.StatusCode);
+        Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", Encoding.UTF8.GetString(downstream.ToArray()));
+        AssertOutcomeAndDuration(metrics, policy, "blocked");
+        Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Fact]
+    public async Task Complete_capture_uses_EOF_bytes_not_declared_length_and_invalid_UTF8_still_records_size()
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("InputSizeInvalidUtf8");
+        using var source = new FragmentedInputStream([0xff, 0xfe, 0xfd]);
+        using var content = new StreamContent(source);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        content.Headers.ContentLength = 1;
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, content, downstream);
+        await invocation.ApplyAsync();
+        Assert.Equal(502, invocation.Context.HttpContext.Response.StatusCode);
+        AssertInputSize(metrics, policy, "blocked", 3);
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task Size_boundary_records_only_complete_capture_at_or_below_limit(int offset)
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("InputSizeBoundary");
+        var body = "{\"other\":\"" + new string('x', ReservedBodyBytes + offset - 12) + "\"}";
+        using var source = new FragmentedInputStream(Encoding.UTF8.GetBytes(body));
+        using var content = new StreamContent(source);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, content, downstream);
+        await invocation.ApplyAsync();
+        Assert.Equal(offset > 0 ? 502 : 200, invocation.Context.HttpContext.Response.StatusCode);
+        if (offset > 0) Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        else AssertInputSize(metrics, policy, "inspected", ReservedBodyBytes + offset);
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Deadline_or_cancellation_at_EOF_checkpoint_does_not_mark_capture_complete(bool clientCanceled)
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("InputSizeEofDeadline");
+        var clock = new ManualBlockClock();
+        using var cancellation = new CancellationTokenSource();
+        using var source = new FragmentedInputStream(Encoding.UTF8.GetBytes(JsonBody), onEof: () =>
+        {
+            if (clientCanceled) cancellation.Cancel();
+            else clock.Advance(TimeSpan.FromSeconds(10));
+        });
+        using var content = new StreamContent(source);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, content, downstream, cancellation.Token, clock: clock);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => invocation.ApplyAsync());
+        AssertOutcomeAndDuration(metrics, policy, clientCanceled ? "canceled" : "timed_out");
+        Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        Assert.Empty(downstream.ToArray());
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
 
     [Fact]
     public async Task Successful_and_blocked_inspections_record_exact_outcomes_and_durations()
@@ -55,6 +182,8 @@ public sealed class PrivacyTelemetryTests
 
         AssertOutcomeAndDuration(metrics, inspected, "inspected");
         AssertOutcomeAndDuration(metrics, blocked, "blocked");
+        AssertInputSize(metrics, inspected, "inspected", Encoding.UTF8.GetByteCount(JsonBody));
+        AssertInputSize(metrics, blocked, "blocked", 8);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -76,6 +205,7 @@ public sealed class PrivacyTelemetryTests
         Assert.Equal("{\"code\":\"privacy_capacity_exceeded\"}", Encoding.UTF8.GetString(downstream.ToArray()));
         AssertOutcome(metrics, policy, "capacity_exceeded");
         Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
         Assert.Equal((1, 1L), budget.Snapshot);
     }
 
@@ -95,10 +225,12 @@ public sealed class PrivacyTelemetryTests
         Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
         Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
 
+        Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
         downstream.Complete();
         await pending.WaitAsync(TimeSpan.FromSeconds(5));
 
         AssertOutcomeAndDuration(metrics, policy, "inspected");
+        AssertInputSize(metrics, policy, "inspected", Encoding.UTF8.GetByteCount(JsonBody));
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -167,6 +299,7 @@ public sealed class PrivacyTelemetryTests
 
         Assert.False(downstream.WriteStarted.IsCompleted);
         AssertOutcomeAndDuration(metrics, policy, "canceled");
+        AssertInputSize(metrics, policy, "canceled", Encoding.UTF8.GetByteCount(JsonBody));
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -189,6 +322,7 @@ public sealed class PrivacyTelemetryTests
         Assert.Same(failure, actual);
         Assert.False(downstream.WriteStarted.IsCompleted);
         AssertOutcomeAndDuration(metrics, policy, "faulted");
+        AssertInputSize(metrics, policy, "faulted", Encoding.UTF8.GetByteCount(JsonBody));
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -233,6 +367,8 @@ public sealed class PrivacyTelemetryTests
 
         AssertOutcomeAndDuration(metrics, canceled, "canceled");
         AssertOutcomeAndDuration(metrics, writeError, "write_error");
+        AssertInputSize(metrics, canceled, "canceled", Encoding.UTF8.GetByteCount(JsonBody));
+        AssertInputSize(metrics, writeError, "write_error", Encoding.UTF8.GetByteCount(JsonBody));
     }
 
     [Theory]
@@ -262,6 +398,7 @@ public sealed class PrivacyTelemetryTests
         AssertOutcomeAndDuration(metrics, policy, "canceled");
         Assert.Equal((0, 0L), budget.Snapshot);
         Assert.Empty(downstream.ToArray());
+        Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
     }
 
     [Fact]
@@ -293,6 +430,7 @@ public sealed class PrivacyTelemetryTests
         var measurement = telemetry.TryStartInspection(policy);
         Assert.NotNull(measurement);
 
+        measurement.CapturedInputBodyBytes = 17;
         Parallel.For(0, 100, index => measurement.Complete(index % 2 == 0
             ? PrivacyInspectionOutcome.Inspected
             : PrivacyInspectionOutcome.Canceled));
@@ -300,6 +438,8 @@ public sealed class PrivacyTelemetryTests
         var outcome = Assert.Single(metrics.ForPolicy(Outcomes, policy.PolicyId));
         Assert.Contains(outcome.Tags["gateway.privacy.outcome"], new[] { "inspected", "canceled" });
         Assert.Single(metrics.ForPolicy(Duration, policy.PolicyId));
+        measurement.Dispose();
+        AssertInputSize(metrics, policy, outcome.Tags["gateway.privacy.outcome"]!, 17);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -355,6 +495,7 @@ public sealed class PrivacyTelemetryTests
             await invocation.ApplyAsync();
             Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
             Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
+            Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
         }
 
         Assert.Equal((0, 0L), budget.Snapshot);
@@ -406,6 +547,10 @@ public sealed class PrivacyTelemetryTests
     [InlineData(Duration, false, "Block")]
     [InlineData(Outcomes, true, "Block")]
     [InlineData(Duration, true, "Block")]
+    [InlineData(InputSize, false, "Mask")]
+    [InlineData(InputSize, true, "Mask")]
+    [InlineData(InputSize, false, "Block")]
+    [InlineData(InputSize, true, "Block")]
     public async Task Throwing_listener_preserves_masked_or_blocked_HTTP_response(string instrument, bool blocked, string mode)
     {
         var policy = Policy("TelemetryThrowingHttp") with { Mode = mode };
@@ -423,6 +568,8 @@ public sealed class PrivacyTelemetryTests
             : mode == "Block" ? "{\"code\":\"privacy_response_blocked\"}"
             : "{\"payment\":{\"cardNumber\":\"************1111\"}}", Encoding.UTF8.GetString(downstream.ToArray()));
         AssertOutcomeAndDuration(metrics, policy, blocked ? "blocked" : mode == "Block" ? "policy_blocked" : "inspected");
+        AssertInputSize(metrics, policy, blocked ? "blocked" : mode == "Block" ? "policy_blocked" : "inspected",
+            blocked ? 8 : Encoding.UTF8.GetByteCount(JsonBody));
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -452,6 +599,7 @@ public sealed class PrivacyTelemetryTests
     [Theory]
     [InlineData(Outcomes)]
     [InlineData(Duration)]
+    [InlineData(InputSize)]
     [InlineData("*")]
     public void Throwing_listeners_keep_concurrent_and_repeated_completion_idempotent(string instrument)
     {
@@ -462,11 +610,13 @@ public sealed class PrivacyTelemetryTests
         using var measurement = telemetry.TryStartInspection(policy);
         Assert.NotNull(measurement);
 
+        measurement.CapturedInputBodyBytes = 0;
         Parallel.For(0, 100, _ => measurement.Complete(PrivacyInspectionOutcome.Inspected));
         measurement.Complete(PrivacyInspectionOutcome.Canceled);
         measurement.Dispose();
 
         AssertOutcomeAndDuration(metrics, policy, "inspected");
+        AssertInputSize(metrics, policy, "inspected", 0);
         Assert.Equal((0, 0L), budget.Snapshot);
         using var next = telemetry.TryStartInspection(Policy("TelemetryAfterThrowingConcurrent"));
         Assert.NotNull(next);
@@ -600,6 +750,7 @@ public sealed class PrivacyTelemetryTests
             ? "{\"code\":\"privacy_inspection_failed\"}" : "{\"code\":\"privacy_response_blocked\"}",
             Encoding.UTF8.GetString(downstream.ToArray()));
         AssertOutcomeAndDuration(metrics, policy, outcome);
+        AssertInputSize(metrics, policy, outcome, Encoding.UTF8.GetByteCount(body));
         Assert.Equal((0, 0L), budget.Snapshot);
         Assert.Equal(6, (int)PrivacyInspectionOutcome.TimedOut);
         Assert.Equal(7, (int)PrivacyInspectionOutcome.PolicyBlocked);
@@ -648,6 +799,7 @@ public sealed class PrivacyTelemetryTests
             Assert.Same(failure, await Assert.ThrowsAsync<IOException>(() => pending.WaitAsync(TimeSpan.FromSeconds(5))));
         else await pending.WaitAsync(TimeSpan.FromSeconds(5));
         AssertOutcomeAndDuration(metrics, policy, outcome);
+        AssertInputSize(metrics, policy, outcome, Encoding.UTF8.GetByteCount(JsonBody));
         Assert.Equal((0, 0L), budget.Snapshot);
         Assert.Equal(0, admission.ActiveRequests);
         using var proxyRecovered = admission.TryAcquire();
@@ -684,6 +836,25 @@ public sealed class PrivacyTelemetryTests
             public void Dispose() => due = long.MaxValue;
             public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
         }
+    }
+
+    private static void AssertInputSize(MetricCollector metrics, CompiledPanPolicy policy, string outcome, long bytes)
+    {
+        var size = Assert.Single(metrics.ForPolicy(InputSize, policy.PolicyId));
+        Assert.Equal(bytes, size.Value);
+        Assert.Equal("By", size.Unit);
+        Assert.IsType<Histogram<long>>(size.Instrument);
+        var terminal = Assert.Single(metrics.ForPolicy(Outcomes, policy.PolicyId));
+        Assert.Same(terminal.Meter, size.Meter);
+        Assert.Equal("Gateway.Privacy", size.Meter.Name);
+        Assert.Equal("1.0.0", size.Meter.Version);
+        Assert.Equal(new Dictionary<string, string?>
+        {
+            ["gateway.route.id"] = policy.RouteId,
+            ["gateway.policy.id"] = policy.PolicyId,
+            ["gateway.policy.version"] = policy.Version,
+            ["gateway.privacy.outcome"] = outcome
+        }.OrderBy(tag => tag.Key), size.Tags.OrderBy(tag => tag.Key));
     }
 
     private static void AssertOutcomeAndDuration(MetricCollector metrics, CompiledPanPolicy policy,
@@ -818,7 +989,7 @@ public sealed class PrivacyTelemetryTests
             var capturedTags = new Dictionary<string, string?>(StringComparer.Ordinal);
             foreach (var tag in tags) capturedTags.Add(tag.Key, tag.Value?.ToString());
             measurements.Enqueue(new CapturedMeasurement(instrument.Name, instrument.Unit,
-                Convert.ToDouble(value), capturedTags, instrument.Meter));
+                Convert.ToDouble(value), capturedTags, instrument.Meter, instrument));
             // Match a test-specific policy, not every Gateway meter in this process.
             // Capture before throwing to prove both independent publications were attempted.
             if ((failingInstrument == instrument.Name || failingInstrument == "*")
@@ -828,7 +999,7 @@ public sealed class PrivacyTelemetryTests
     }
 
     private sealed record CapturedMeasurement(string InstrumentName, string? Unit, double Value,
-        IReadOnlyDictionary<string, string?> Tags, Meter Meter);
+        IReadOnlyDictionary<string, string?> Tags, Meter Meter, Instrument Instrument);
 
     private sealed class ControlledWriteStream(bool cooperative = true) : Stream
     {
@@ -882,6 +1053,32 @@ public sealed class PrivacyTelemetryTests
             return 0;
         }
 
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class FragmentedInputStream(byte[] bytes, int? failAfterReads = null, Action? onEof = null) : Stream
+    {
+        private int position;
+        private int reads;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (reads++ == failAfterReads) throw new IOException("Synthetic incomplete read.");
+            var count = Math.Min(Math.Min(7, buffer.Length), bytes.Length - position);
+            bytes.AsMemory(position, count).CopyTo(buffer);
+            position += count;
+            if (count == 0) onEof?.Invoke();
+            return ValueTask.FromResult(count);
+        }
         public override void Flush() { }
         public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
