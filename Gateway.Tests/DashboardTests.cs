@@ -66,7 +66,9 @@ public sealed class DashboardTests
         Assert.True(root.GetProperty("health").GetProperty("live").GetBoolean());
         Assert.True(root.GetProperty("health").GetProperty("ready").GetBoolean());
         var policy = Assert.Single(root.GetProperty("policies").EnumerateArray());
-        Keys(policy, "routeId", "policyId", "version", "mode", "maxBodyBytes");
+        Keys(policy, "routeId", "policyId", "version", "mode", "maxBodyBytes", "transformation", "ruleCount", "transformations");
+        Assert.Equal(1, policy.GetProperty("ruleCount").GetInt32());
+        Assert.Equal(new[] { "PAN" }, policy.GetProperty("transformations").EnumerateArray().Select(value => value.GetString()));
         Assert.Equal("protected-payment", policy.GetProperty("routeId").GetString());
         Assert.Equal("Mask", policy.GetProperty("mode").GetString());
         var metrics = root.GetProperty("metrics");

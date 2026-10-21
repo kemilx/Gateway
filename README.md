@@ -1,4 +1,4 @@
-# MVP-24 — Panel local de consulta y privacidad PAN
+# MVP-26 — Varias reglas por política y consulta local
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,174 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Transformaciones opt-in (MVP-25, solo datos sintéticos)
+
+`PanPolicies:Policies:0:Transformation` admite únicamente los strings exactos
+`PAN`, `Email` y `Phone`. Omitirlo conserva `PAN`; null explícito, vacío,
+espacios, diferencias de mayúsculas, números y valores desconocidos impiden el
+arranque. `PolicyId` sigue siendo un identificador arbitrario, no el tipo de
+transformación. El catálogo congela estas opciones al arrancar; cambiarlo requiere
+reiniciar. No cambia ningún appsettings distribuido ni los defaults PAN / Mask.
+
+Ejemplo de configuración **opt-in** por CLI (upstream local sintético que devuelva
+`{"contact":{"email":"user@example.test"}}` en la ruta protegida):
+
+```powershell
+dotnet run --project Gateway -- --urls http://127.0.0.1:5100 --PanPolicies:Policies:0:Transformation Email --PanPolicies:Policies:0:Selector '$.contact.email' --PanPolicies:CoverageContract:Required:0:Selector '$.contact.email'
+```
+
+El mismo conjunto de claves puede inyectarse con `AddInMemoryCollection` en un
+host de pruebas. Para Phone, usar `Transformation Phone` y el selector
+`$.contact.phone` **también en CoverageContract**; un valor sintético es
+`+1-809-555-0199` → `+*-***-***-0199`. Email produce
+`user@example.test` → `***@example.test`. `/payment` y `Sample` de TestApi conservan
+la demo PAN. El endpoint nuevo `/customer` contiene exclusivamente PAN, email y
+teléfono sintéticos. No usar datos reales.
+
+El selector/transformación principal permanece obligatorio/default PAN; las reglas
+adicionales opt-in de MVP26 se describen abajo. Solo transforma strings
+seleccionados en JSON elegible; null pasa, otro tipo terminal causa 502 de
+inspección sin salida parcial. En Mask, cada string sustituido cuenta una máscara,
+incluida redacción completa. En Block, **cualquier string**, incluso vacío o
+incompatible, bloquea sin ejecutar máscaras; null/no-match no bloquean y un error
+posterior de inspección tiene precedencia. La demo local del panel sigue siendo
+una simulación fija Mask/Block, no una configuración de estas transformaciones.
+
+Formatos conservadores explícitos, **no detección ni validación universal**:
+
+- Email: ASCII dot-atom, total 1..254 caracteres, local 1..64; letras/dígitos y
+  `!#$%&'*+-/=?^_` más acento grave, `{|}~` y puntos no iniciales/finales/consecutivos.
+  Exactamente un `@`; dominio de etiquetas DNS ASCII de 1..63 caracteres alfanuméricos
+  o guiones interiores, sin etiquetas vacías ni punto final; acepta una sola etiqueta
+  y punycode por formato, sin consulta DNS. Conserva el dominio exactamente y sustituye
+  todo el local por `***`, incluso local de un carácter. No admite quoted local,
+   display name, literales de dirección entre corchetes, Unicode ni whitespace.
+   La gramática permite etiquetas numéricas, incluido `a@127.0.0.1` →
+   `***@127.0.0.1`: no interpreta ni resuelve el dominio como una dirección IP.
+- Phone: 1..64 caracteres, 5..15 dígitos ASCII, espacios/guiones internos y `+`
+  opcional solo inicial; comienza con dígito o `+` y termina en dígito. Conserva
+  plus/separadores y los últimos cuatro dígitos. No admite paréntesis, extensiones,
+  plus repetido ni Unicode; no garantiza E.164 ni validez internacional.
+- Cualquier valor incompatible o demasiado corto/largo se sustituye completamente
+   por `[REDACTED]`. PAN conserva su algoritmo previo: más de cuatro dígitos ASCII,
+   espacios/guiones permitidos, sin plus; últimos cuatro visibles.
+
+Estas máscaras no anonimizan: el dominio completo y los últimos cuatro dígitos
+siguen visibles; por ejemplo, `12345` → `*2345` oculta solo un dígito.
+
+El summary añade solo `policies[].transformation` a la allowlist (cambio aditivo,
+`schemaVersion: 1`), sin selectores ni valores; no añade tags/outcomes de telemetría.
+Rollback: **retirar la clave Transformation antes de volver al binario anterior**,
+que rechaza esa opción desconocida; restaurar selector y coverage PAN coincidentes
+si se pretende recuperar la demo original. No requiere migración de datos.
+
+Validación MVP-25: build Release sin errores/advertencias, focalizados
+**103/103 PASS**, suite completa **549/549 PASS**, sin omitidos; Edge headless
+**6/6 PASS**, incluida la columna Transformación con Email configurado.
+Revisión independiente estática de código **APPROVED** y de seguridad
+**APPROVED_WITH_WARNINGS** (privacidad residual y alcance limitado de las gramáticas).
+Solo validación sintética local: sin despliegue, aceptación RNF03 ni aprobación
+para datos reales. La configuración y demostración predeterminadas siguen en PAN.
+
+### Varias reglas opt-in por la misma política/ruta (MVP-26)
+
+Implementación validada localmente con datos sintéticos; no implica aprobación de producto.
+`Selector` principal sigue siendo obligatorio y `Transformation` principal sigue
+siendo PAN al omitirse. `AdditionalRules` ausente equivale a lista vacía; permite
+0..15 reglas `{Selector, Transformation}` (1..16 reglas totales), con PAN por
+defecto al omitir la transformación adicional. Los tipos admitidos son los mismos
+strings exactos PAN/Email/Phone; no se deducen de PolicyId. No hay detectores,
+Observe, reload, persistencia ni editor nuevo.
+
+Ejemplo sintético opt-in, conservando el selector PAN distribuido. Mantener TestApi
+en otra terminal (`dotnet run --project TestApi -- --urls http://127.0.0.1:5101`).
+Detener primero cualquier Gateway anterior con Ctrl+C y ejecutar en su terminal:
+
+```powershell
+dotnet run --project Gateway -- --urls http://127.0.0.1:5100 `
+  --PanPolicies:Policies:0:Version v2 --PanPolicies:CoverageContract:Version v2 `
+  --PanPolicies:Policies:0:AdditionalRules:0:Selector '$.contact.email' `
+  --PanPolicies:Policies:0:AdditionalRules:0:Transformation Email `
+  --PanPolicies:Policies:0:AdditionalRules:1:Selector '$.contact.phone' `
+  --PanPolicies:Policies:0:AdditionalRules:1:Transformation Phone `
+  --PanPolicies:CoverageContract:Required:1:RouteId protected-payment `
+  --PanPolicies:CoverageContract:Required:1:Selector '$.contact.email' `
+  --PanPolicies:CoverageContract:Required:2:RouteId protected-payment `
+  --PanPolicies:CoverageContract:Required:2:Selector '$.contact.phone'
+```
+
+El servidor mantiene ocupada esa terminal. Desde una tercera terminal:
+
+```powershell
+curl.exe http://127.0.0.1:5100/protected/customer
+```
+
+La ruta YARP sigue siendo `protected-payment`: la política se aplica a **todo**
+`/protected/{**rest}`, no solo a `/customer`. El origen `/customer` devuelve
+`{"payment":{"cardNumber":"4111111111111111"},"contact":{"email":"user@example.test","phone":"+1-809-555-0199"}}`.
+La ruta passthrough y el origen directo siguen sin protección.
+
+Los selectores conservan 1..16 pasos y hasta 1041 caracteres. Se rechazan
+duplicados y prefijos por pasos ordinales entre todas las reglas, en cualquier
+orden: `$.a` frente a `$.a.b` y `$.a[*]` frente a `$.a[*].email` se solapan;
+`$.a` frente a `$.ab`, y `$.a.b` frente a `$.a[*].b`, no. Sigue habiendo una
+política por RouteId y hasta 32 políticas.
+
+CoverageContract mantiene 1..32 requisitos mínimos; ahora la unicidad corresponde
+al **par ordinal RouteId/Selector**, no a RouteId solo. Cada par debe coincidir con
+la regla principal o una adicional de la política de esa ruta. El ejemplo declara
+los tres campos en coverage para detectar la pérdida o cambio de cualquiera de esas
+reglas; el contrato permite otras reglas válidas no incluidas en ese mínimo.
+No se exige ni promete cobertura completa de
+todos los campos. Las versiones de política/coverage las suministra el operador:
+revisarlas explícitamente al cambiar el contrato, sin incremento automático ni
+cambios en appsettings distribuido.
+
+Con varias reglas se construye un trie local por respuesta y se realiza una sola
+pasada de transformación del DOM, preservando propiedades repetidas. El máximo
+257 nodos (1 + 16 × 16) **no** es límite total de asignaciones ni de memoria. Sin
+adicionales se conserva el recorrido previo. Modo, lease, deadline y métricas son
+por política; Block considera cualquier string seleccionado y los fallos tardíos
+prevalecen, sin contar máscaras parciales ni entregar el original.
+
+El summary conserva `transformation` principal y añade `ruleCount` y
+`transformations` (tipos distintos en orden principal/adicionales), schemaVersion1,
+sin selectores/valores ni tags nuevos. El panel conserva seis columnas y muestra,
+por ejemplo, `PAN, Email, Phone · 3 reglas`, mediante textContent. Si ambos campos
+nuevos faltan acepta el contrato anterior de una regla; presencia parcial o datos
+inválidos se rechazan. La simulación de la UI sigue fija y no configura reglas.
+
+Antes de rollback a MVP25, **retirar AdditionalRules y los requisitos dependientes**;
+el binario anterior no reconoce la clave. Recuperar el comportamiento legacy no
+equivale a proteger varios campos. No hay migración de datos ni despliegue.
+El constructor/deconstruct de cinco argumentos de `CompiledPanPolicy` se conserva.
+Consumidores binarios del constructor anterior de `PanPolicyCatalog` deben
+recompilarse: añadir el parámetro opcional conserva compatibilidad fuente, no su
+firma IL anterior. No se conocen consumidores binarios externos en este proyecto.
+
+El contrato se aplica a la **configuración efectiva normalizada por IConfiguration**,
+no a los tipos JSON originales. Usar ausencia o array JSON como formas recomendadas.
+Ausencia, `[]` y `""` equivalen a cero adicionales. Un objeto con claves canónicas
+contiguas `"0"`...`"n-1"` equivale al array de reglas en ese orden; sus reglas se
+validan, congelan y ejecutan, nunca se omiten. Son aliases explícitos porque el
+proveedor estándar aplana esas formas de manera indistinguible.
+Se rechazan malformas observables: null conservado por el proveedor estándar,
+escalares no vacíos, huecos/índices no canónicos, valores escalares junto a hijos,
+elementos inválidos y campos desconocidos/anidados. No se promete recuperar
+información descartada por proveedores arbitrarios. Coverage sigue exigiendo cada
+par declarado: una lista vacía no permite omitir una regla que coverage requiera.
+
+Validación MVP-26: build Release sin errores/advertencias; focalizada **135/135 PASS**
+y suite completa **684/684 PASS**, sin omitidos. Edge headless **8/8 PASS**:
+tres campos realmente enmascarados vía YARP, métricas de tres máscaras, tabla de
+tipos/cantidad, fallback legacy y 13 particiones de metadata inválida, recuperación,
+vista móvil y barreras CSP/cross-origin. La prueba HTTP espera publicación terminal
+y liberación del lease: recibir el cuerpo no garantiza que las métricas ya estén
+publicadas. Revisión independiente de código y seguridad **APPROVED_WITH_WARNINGS**;
+sin bloqueantes locales. Persisten privacidad residual, límites de configuración
+normalizada, observadores de checkpoints sensibles a implementación y restricciones
+locales del panel. No certifica SLA, sizing, producción ni accesibilidad exhaustiva.
 
 ### Panel local de consulta (MVP-24)
 
@@ -220,7 +388,7 @@ nuevo. No hay migraciones, paquetes nuevos ni despliegue realizado.
 - Options nativo enlaza tipos y aplica `ValidateOnStart`. Se exige entre 1 y 32 políticas; sección ausente, lista vacía o configuración inválida impiden arrancar/servir tráfico. YARP también valida al compilar sus transforms durante `Build`, antes de abrir el listener. Campos desconocidos se rechazan.
 - `PolicyId`, `Version` y `RouteId`: 1–64 caracteres ASCII, patrón `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; RouteId único con comparación ordinal y existente en el mismo conjunto de RouteConfig entregado a YARP (`protected-payment` o `passthrough` en esta demo). Una ruta inexistente impide Build/Start, nunca queda una política silenciosamente sin usar. `Mode` es obligatorio y acepta exclusivamente los textos exactos `Mask` y `Block`; números, distinta capitalización, espacios y vacío se rechazan. IDs/versiones acotados evitan inyección en logs y cardinalidad ilimitada durante el proceso.
 - Selector estructural acotado (no JSONPath completo): `$` seguido de 1 a 16 pasos, cada uno una propiedad `.[A-Za-z_][A-Za-z0-9_]{0,63}` o comodín de array `[*]` explícito; máximo total 1041 caracteres. Se conservan los límites operativos anteriores, contando cada comodín como un paso. Ejemplos: `$.payment.cardNumber`, `$.payments[*].cardNumber`, `$.cards[*]`, `$.groups[*][*].cardNumber` y `$[*].cardNumber` para array raíz. Sin índices, filtros, descenso recursivo, comodín de propiedades, comillas ni escapes. Comparación ordinal case-sensitive; se visitan todos los duplicados y todos los elementos de arrays seleccionados. Un paso de propiedad solo recorre objetos y `[*]` solo arrays: otro tipo antes del terminal no coincide y se conserva. Arrays vacíos no cambian. Terminal `null` pasa; string aplica Mask o Block según Mode; otro tipo terminal falla cerrado para toda la respuesta, sin publicar una transformación parcial. Se comprueba cancelación/deadline por elemento; no cambia la reserva ni concurrencia.
-- `CoverageContract` es obligatorio: `Version` usa el mismo formato seguro de identificadores y `Required` contiene entre 1 y 32 pares RouteId/Selector. Cada RouteId debe ser conocido y único dentro del contrato, y cada selector usa la gramática anterior. Cada par debe coincidir **exactamente (ordinal, case-sensitive)** con una política efectiva. Cambiar solo ruta o selector, omitir cobertura, duplicar requisitos o configurar un contrato inválido impide Build/Start. Es cobertura **mínima**: pueden existir políticas adicionales válidas, pero no sustituyen requisitos. La versión identifica el contrato; no debe coincidir necesariamente con la versión de cada política.
+- `CoverageContract` es obligatorio: `Version` usa el mismo formato seguro de identificadores y `Required` contiene entre 1 y 32 pares RouteId/Selector. Cada RouteId debe ser conocido; la unicidad es por par RouteId/Selector, permitiendo varios selectores de la misma ruta. Cada selector usa la gramática anterior y cada par debe coincidir **exactamente (ordinal, case-sensitive)** con la regla principal o una adicional de la política efectiva. Cambiar solo ruta o selector, omitir cobertura, duplicar pares o configurar un contrato inválido impide Build/Start. Es cobertura **mínima**, no necesariamente completa. La versión identifica el contrato; no debe coincidir necesariamente con la versión de cada política y la suministra el operador.
 - El contrato detecta desviaciones de las políticas respecto a una cobertura declarada, no descubre dónde existe PAN. **Cambiar conjuntamente política y contrato es un cambio de seguridad que requiere revisión** (y versionado explícito del contrato). No protege frente a quien controla ambos archivos/configuración o sus sobrescrituras: ese control está dentro del límite de confianza. El valor distribuido exige `protected-payment` + `$.payment.cardNumber`; migrar configuraciones anteriores requiere añadir explícitamente el contrato antes de iniciar esta versión.
 - `MaxBodyBytes`: entero obligatorio de 1 a **16.777.216** bytes inclusive. El techo operativo de 16 MiB acota el buffering por respuesta; no constituye un presupuesto global de memoria ni cambia el valor aprobado por defecto de 1 MiB.
 - Catálogo inmutable por RouteId y selectores segmentados una sola vez al iniciar. **Sin BD ni reload dinámico de políticas**: `IOptions`, no monitor/snapshot; cambiar archivo/configuración requiere reiniciar. Las fuentes estándar de configuración .NET pueden sobrescribir valores antes del arranque, sujetos a la misma validación. Las rutas YARP de esta demo siguen definidas en código; cambiar RouteId asigna una política a una ruta, no crea rutas nuevas. Rutas sin política son passthrough.

@@ -12,7 +12,13 @@ internal static class GatewayDashboardEndpoints
         var startedAtUtc = DateTimeOffset.UtcNow;
         var catalog = app.Services.GetRequiredService<PanPolicyCatalog>();
         var policies = routeIds.Select(catalog.Find).OfType<CompiledPanPolicy>()
-            .Select(p => new DashboardPolicy(p.RouteId, p.PolicyId, p.Version, p.Mode, p.MaxBodyBytes))
+            .Select(p => new DashboardPolicy(p.RouteId, p.PolicyId, p.Version, p.Mode, p.MaxBodyBytes)
+            {
+                Transformation = p.Transformation,
+                RuleCount = 1 + p.AdditionalRules.Length,
+                Transformations = p.AdditionalRules.Select(rule => rule.Transformation).Prepend(p.Transformation)
+                    .Distinct(StringComparer.Ordinal).ToImmutableArray()
+            })
             .ToImmutableArray();
         var telemetry = app.Services.GetRequiredService<PrivacyTelemetry>();
         var lifetime = app.Lifetime;

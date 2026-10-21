@@ -24,13 +24,24 @@
   const text = (value) => typeof value === "string" || count(value);
   const validDate = (value) => typeof value === "string" && Number.isFinite(Date.parse(value));
 
+  function validRules(p) {
+    const hasCount = Object.hasOwn(p, "ruleCount");
+    const hasTypes = Object.hasOwn(p, "transformations");
+    if (!hasCount && !hasTypes) return true;
+    return hasCount && hasTypes && count(p.ruleCount) && p.ruleCount >= 1 && p.ruleCount <= 16
+      && Array.isArray(p.transformations) && p.transformations.length >= 1
+      && p.transformations.every((t) => ["PAN", "Email", "Phone"].includes(t))
+      && new Set(p.transformations).size === p.transformations.length
+      && p.transformations.includes(p.transformation) && p.ruleCount >= p.transformations.length;
+  }
+
   function validate(data) {
     const m = data?.metrics;
     return data?.schemaVersion === 1 && validDate(data.startedAtUtc)
       && typeof data.health?.live === "boolean" && typeof data.health?.ready === "boolean"
       && Array.isArray(data.policies) && data.policies.every((p) => p &&
         typeof p.routeId === "string" && typeof p.policyId === "string" && text(p.version)
-        && typeof p.mode === "string" && count(p.maxBodyBytes))
+        && typeof p.mode === "string" && ["PAN", "Email", "Phone"].includes(p.transformation) && count(p.maxBodyBytes) && validRules(p))
       && m && outcomes.every(([key]) => count(m.outcomes?.[key]))
       && [m.validatedMasks, m.activeInspections, m.reservedBodyBytes].every(count)
       && [m.input, m.output].every((v) => v && count(v.samples) && count(v.totalBytes))
@@ -77,13 +88,16 @@
     setText("duration-total", `Total acumulado: ${number.format(m.duration.totalMilliseconds)} ms`);
     const rows = data.policies.map((p) => {
       const row = document.createElement("tr");
-      row.append(...[p.routeId, p.policyId, p.version, p.mode, number.format(p.maxBodyBytes)].map((v) => cell(v)));
+      const ruleCount = p.ruleCount ?? 1;
+      const transformations = p.transformations ?? [p.transformation];
+      const rules = `${transformations.join(", ")} · ${ruleCount} ${ruleCount === 1 ? "regla" : "reglas"}`;
+      row.append(...[p.routeId, p.policyId, p.version, p.mode, rules, number.format(p.maxBodyBytes)].map((v) => cell(v)));
       return row;
     });
     if (!rows.length) {
       const row = document.createElement("tr");
       const empty = cell("No hay políticas publicadas por esta instancia.");
-      empty.colSpan = 5;
+      empty.colSpan = 6;
       row.append(empty);
       rows.push(row);
     }

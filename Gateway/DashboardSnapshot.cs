@@ -9,7 +9,12 @@ internal sealed record DashboardSnapshot(int SchemaVersion, DateTimeOffset Start
 /// <summary>Local pipeline health, independent of upstream availability and capacity.</summary>
 internal sealed record DashboardHealth(bool Live, bool Ready);
 /// <summary>Allowlisted immutable policy metadata, without selectors or topology.</summary>
-internal sealed record DashboardPolicy(string RouteId, string PolicyId, string Version, string Mode, int MaxBodyBytes);
+internal sealed record DashboardPolicy(string RouteId, string PolicyId, string Version, string Mode, int MaxBodyBytes)
+{
+    public string Transformation { get; init; } = "PAN";
+    public int RuleCount { get; init; } = 1;
+    public ImmutableArray<string> Transformations { get; init; } = ["PAN"];
+}
 /// <summary>Fixed-size lifetime totals and current inspection gauges.</summary>
 internal sealed record DashboardMetrics(DashboardOutcomes Outcomes, long ValidatedMasks,
     DashboardBytes Input, DashboardBytes Output, DashboardDuration Duration, int ActiveInspections, long ReservedBodyBytes);

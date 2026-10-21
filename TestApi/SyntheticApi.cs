@@ -24,6 +24,15 @@ public static class SyntheticApi
             context.Response.ContentLength = bytes.Length;
             await context.Response.Body.WriteAsync(bytes);
         });
+        app.MapGet("/customer", async context =>
+        {
+            var bytes = Encoding.UTF8.GetBytes("{\"payment\":{\"cardNumber\":\"4111111111111111\"},\"contact\":{\"email\":\"user@example.test\",\"phone\":\"+1-809-555-0199\"}}");
+            context.Response.Headers["X-Synthetic-Upstream"] = "test-api";
+            context.Response.Headers.ETag = "\"raw-customer-v1\"";
+            context.Response.ContentType = "application/json; charset=utf-8";
+            context.Response.ContentLength = bytes.Length;
+            await context.Response.Body.WriteAsync(bytes, context.RequestAborted);
+        });
         endpoints?.Invoke(app);
         return app;
     }
