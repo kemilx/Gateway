@@ -24,8 +24,10 @@ public sealed class PrivacyTelemetry : IDisposable
     internal TimeSpan InspectionTimeout => budget.InspectionTimeout;
     private readonly Meter meter = new(MeterName, MeterVersion);
     private readonly Counter<long> outcomes;
+    private readonly Counter<long> masks;
     private readonly Histogram<double> duration;
     private readonly Histogram<long> inputBodyBytes;
+    private readonly Histogram<long> outputBodyBytes;
     private readonly ObservableGauge<int> active;
     private readonly ObservableGauge<long> reservedBodyBytes;
 
@@ -33,8 +35,10 @@ public sealed class PrivacyTelemetry : IDisposable
     {
         this.budget = budget;
         outcomes = meter.CreateCounter<long>("gateway.privacy.inspection.outcomes", "{inspection}");
+        masks = meter.CreateCounter<long>("gateway.privacy.inspection.masks", "{mask}");
         duration = meter.CreateHistogram<double>("gateway.privacy.inspection.duration", "ms");
         inputBodyBytes = meter.CreateHistogram<long>("gateway.privacy.inspection.input_body_bytes", "By");
+        outputBodyBytes = meter.CreateHistogram<long>("gateway.privacy.inspection.output_body_bytes", "By");
         active = meter.CreateObservableGauge<int>("gateway.privacy.inspection.active",
             () => budget.Snapshot.ActiveInspections, "{inspection}");
         reservedBodyBytes = meter.CreateObservableGauge<long>("gateway.privacy.inspection.reserved_body_bytes",
@@ -62,7 +66,8 @@ public sealed class PrivacyTelemetry : IDisposable
     public void Dispose() => meter.Dispose();
 
     private void RecordOutcome(CompiledPanPolicy policy, PrivacyInspectionOutcome outcome,
-        double? durationMilliseconds, long? capturedInputBodyBytes = null)
+        double? durationMilliseconds, long? capturedInputBodyBytes = null, long? preparedOutputBodyBytes = null,
+        long validatedMasks = 0)
     {
         var tags = new TagList
         {
@@ -97,6 +102,23 @@ public sealed class PrivacyTelemetry : IDisposable
             }
             catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
         }
+
+        if (preparedOutputBodyBytes is { } outputBytes)
+        {
+            try
+            {
+                outputBodyBytes.Record(outputBytes, tags);
+            }
+            catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
+        }
+        if (validatedMasks > 0)
+        {
+            try
+            {
+                masks.Add(validatedMasks, tags);
+            }
+            catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
+        }
     }
 
     private static bool IsOrdinaryListenerFailure(Exception exception) =>
@@ -124,6 +146,8 @@ public sealed class PrivacyTelemetry : IDisposable
         internal long StartedAt { get; }
         private int completed;
         internal long? CapturedInputBodyBytes { get; set; }
+        internal long? PreparedOutputBodyBytes { get; set; }
+        internal long ValidatedMasks { get; set; }
 
         internal InspectionMeasurement(PrivacyTelemetry telemetry, CompiledPanPolicy policy, IDisposable lease, TimeProvider clock, long startedAt)
         {
@@ -143,7 +167,7 @@ public sealed class PrivacyTelemetry : IDisposable
             try
             {
                 telemetry.RecordOutcome(policy, outcome, clock.GetElapsedTime(StartedAt).TotalMilliseconds,
-                    CapturedInputBodyBytes);
+                    CapturedInputBodyBytes, PreparedOutputBodyBytes, ValidatedMasks);
             }
             finally
             {

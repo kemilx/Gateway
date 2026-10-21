@@ -109,9 +109,13 @@ public sealed class PanResponseTransform
                 using var transformed = new MemoryStream();
                 deadline.Check();
                 bool changed;
+                long calculatedMasks = 0;
                 using (var writer = new Utf8JsonWriter(transformed))
-                    changed = WriteSelected(document.RootElement, writer, policy, 0, deadline);
+                    changed = WriteSelected(document.RootElement, writer, policy, 0, deadline, ref calculatedMasks);
                 deadline.Check();
+                // Commit only a fully validated traversal, never partial substitutions.
+                // This measures calculation, not PAN detection or downstream delivery.
+                inspection.ValidatedMasks = calculatedMasks;
                 // A match is only a candidate block: finish validation and checkpoints first.
                 if (changed && policy.Mode == "Block")
                 {
@@ -162,6 +166,8 @@ public sealed class PanResponseTransform
             });
             writeStarted = true;
             deadline.Check();
+            // Prepared body size, not bytes delivered: retain it if the write later fails.
+            inspection.PreparedOutputBodyBytes = output.Length;
             await response.Body.WriteAsync(output, deadline.Token);
             deadline.Check();
             await deadline.DisposeAsync();
@@ -184,7 +190,8 @@ public sealed class PanResponseTransform
         }
     }
 
-    private static bool WriteSelected(JsonElement value, Utf8JsonWriter writer, CompiledPanPolicy policy, int segment, InspectionDeadline deadline)
+    private static bool WriteSelected(JsonElement value, Utf8JsonWriter writer, CompiledPanPolicy policy, int segment,
+        InspectionDeadline deadline, ref long calculatedMasks)
     {
         deadline.Check();
         if (segment == policy.Segments.Length)
@@ -193,7 +200,11 @@ public sealed class PanResponseTransform
             if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
             // Block selects every string, including empty/non-PAN; never mask it or stop traversal.
             if (policy.Mode == "Block") writer.WriteNullValue();
-            else writer.WriteStringValue(Mask(value.GetString()!));
+            else
+            {
+                writer.WriteStringValue(Mask(value.GetString()!));
+                calculatedMasks++;
+            }
             deadline.Check();
             return true;
         }
@@ -205,7 +216,7 @@ public sealed class PanResponseTransform
             foreach (var element in value.EnumerateArray())
             {
                 deadline.Check();
-                arrayChanged |= WriteSelected(element, writer, policy, segment + 1, deadline);
+                arrayChanged |= WriteSelected(element, writer, policy, segment + 1, deadline, ref calculatedMasks);
             }
             writer.WriteEndArray();
             return arrayChanged;
@@ -218,7 +229,7 @@ public sealed class PanResponseTransform
             deadline.Check();
             writer.WritePropertyName(property.Name);
             if (property.Name == policy.Segments[segment])
-                changed |= WriteSelected(property.Value, writer, policy, segment + 1, deadline);
+                changed |= WriteSelected(property.Value, writer, policy, segment + 1, deadline, ref calculatedMasks);
             else CopyElement(property.Value, writer, deadline);
         }
         writer.WriteEndObject();

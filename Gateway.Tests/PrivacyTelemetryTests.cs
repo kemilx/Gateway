@@ -26,8 +26,203 @@ public sealed class PrivacyTelemetryTests
     private const string Outcomes = "gateway.privacy.inspection.outcomes";
     private const string Duration = "gateway.privacy.inspection.duration";
     private const string InputSize = "gateway.privacy.inspection.input_body_bytes";
+    private const string OutputSize = "gateway.privacy.inspection.output_body_bytes";
+    private const string Masks = "gateway.privacy.inspection.masks";
     private const string Active = "gateway.privacy.inspection.active";
     private const string Reserved = "gateway.privacy.inspection.reserved_body_bytes";
+
+    [Theory]
+    [InlineData("strings", "Mask", 4)]
+    [InlineData("strings", "Block", 0)]
+    [InlineData("null", "Mask", 0)]
+    [InlineData("missing", "Mask", 0)]
+    [InlineData("late-invalid", "Mask", 0)]
+    public async Task Masks_count_all_selected_strings_only_after_valid_traversal(string scenario, string mode, long expected)
+    {
+        var body = scenario switch
+        {
+            "strings" => "{\"cards\":[{\"number\":\"4111111111111111\",\"number\":\"\"},{\"number\":\"not-a-pan\"},{\"number\":null},{\"number\":\"1234\"}]}",
+            "null" => "{\"cards\":[{\"number\":null}]}",
+            "missing" => "{ \"cards\":[{},null,42,[]],\"other\":\"4111111111111111\" }",
+            "late-invalid" => "{\"cards\":[{\"number\":\"4111111111111111\"},{\"number\":\"valid\",\"number\":42}]}",
+            _ => throw new ArgumentException(nameof(scenario))
+        };
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = new CompiledPanPolicy("MasksTraversal", "v1", "protected-payment", ["cards", "[*]", "number"], ReservedBodyBytes) { Mode = mode };
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(body), downstream);
+        await invocation.ApplyAsync();
+        var outcome = scenario == "late-invalid" ? "blocked" : scenario == "strings" && mode == "Block" ? "policy_blocked" : "inspected";
+        AssertOutcomeAndDuration(metrics, policy, outcome);
+        AssertMasks(metrics, policy, outcome, expected);
+        Assert.Equal(outcome == "inspected" ? 200 : 502, invocation.Context.HttpContext.Response.StatusCode);
+        if (scenario is "null" or "missing") Assert.Equal(body, Encoding.UTF8.GetString(downstream.ToArray()));
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Masks_require_post_traversal_deadline_check(bool clientCanceled)
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("MasksTraversalDeadline");
+        using var cancellation = new CancellationTokenSource();
+        var clock = new ManualBlockClock();
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream, cancellation.Token, clock: clock);
+        var traversing = false;
+        var triggered = false;
+        clock.TimestampObserved = () =>
+        {
+            // Observe the real traversal boundary without a production test hook or wall-clock race.
+            var inTraversal = new System.Diagnostics.StackTrace().GetFrames().Any(frame => frame.GetMethod()?.Name == "WriteSelected");
+            if (inTraversal) { traversing = true; return; }
+            if (!traversing) return;
+            clock.TimestampObserved = null;
+            triggered = true;
+            if (clientCanceled) cancellation.Cancel();
+            else clock.Advance(TimeSpan.FromSeconds(10));
+        };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => invocation.ApplyAsync());
+        Assert.True(triggered);
+        AssertOutcomeAndDuration(metrics, policy, clientCanceled ? "canceled" : "timed_out");
+        AssertMasks(metrics, policy, clientCanceled ? "canceled" : "timed_out", 0);
+        Assert.Empty(downstream.ToArray());
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Fact]
+    public async Task Masks_survive_header_preparation_failure_after_validation()
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("MasksHeaderFailure");
+        using var downstream = new ControlledWriteStream();
+        TransformInvocation? invocation = null;
+        using (invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream,
+            diagnosticCheckpoint: _ =>
+            {
+                ((HeaderDictionary)invocation!.Context.HttpContext.Response.Headers).IsReadOnly = true;
+                return ValueTask.CompletedTask;
+            }))
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => invocation.ApplyAsync());
+            Assert.False(downstream.WriteStarted.IsCompleted);
+            AssertOutcomeAndDuration(metrics, policy, "faulted");
+            AssertMasks(metrics, policy, "faulted", 1);
+            Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
+            Assert.Equal((0, 0L), budget.Snapshot);
+        }
+    }
+
+    [Fact]
+    public async Task Cancellation_before_inspection_emits_no_masks_or_terminal_metrics()
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("MasksPreCanceled");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream, cancellation.Token);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => invocation.ApplyAsync());
+        Assert.Empty(metrics.ForPolicy(Masks, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
+        Assert.Empty(downstream.ToArray());
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData("escaped-mask")]
+    [InlineData("original")]
+    [InlineData("null")]
+    [InlineData("block")]
+    [InlineData("invalid-json")]
+    [InlineData("invalid-terminal")]
+    public async Task Prepared_output_records_exact_final_UTF8_bytes_not_input_or_discarded_buffer(string scenario)
+    {
+        const string unicodeBody = "{ \"payment\" : {\"cardNumber\":\"4111-1111-1111-1111\"}, \"note\":\"é😀\\n\" }\n";
+        var body = scenario switch
+        {
+            "original" => "{ \"other\" : \"é😀\\n\" }\n",
+            "null" => "{ \"payment\" : {\"cardNumber\":null}, \"note\":\"é😀\" }\n",
+            "invalid-json" => "{INVALID",
+            "invalid-terminal" => "{\"payment\":{\"cardNumber\":\"selected\",\"cardNumber\":42}}",
+            _ => unicodeBody
+        };
+        var expected = scenario switch
+        {
+            "escaped-mask" => """{"payment":{"cardNumber":"****-****-****-1111"},"note":"\u00E9\uD83D\uDE00\n"}""",
+            "block" => "{\"code\":\"privacy_response_blocked\"}",
+            "invalid-json" or "invalid-terminal" => "{\"code\":\"privacy_inspection_failed\"}",
+            _ => body
+        };
+        var outcome = scenario == "block" ? "policy_blocked"
+            : scenario is "invalid-json" or "invalid-terminal" ? "blocked" : "inspected";
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("OutputSizeExact") with { Mode = scenario == "block" ? "Block" : "Mask" };
+        using var downstream = new MemoryStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(body), downstream);
+
+        await invocation.ApplyAsync();
+
+        var expectedBytes = Encoding.UTF8.GetBytes(expected);
+        Assert.Equal(expectedBytes, downstream.ToArray());
+        Assert.Equal((long)expectedBytes.Length, invocation.Context.HttpContext.Response.ContentLength);
+        Assert.Equal(outcome == "inspected" ? 200 : 502, invocation.Context.HttpContext.Response.StatusCode);
+        AssertOutcomeAndDuration(metrics, policy, outcome);
+        AssertInputSize(metrics, policy, outcome, Encoding.UTF8.GetByteCount(body));
+        AssertOutputSize(metrics, policy, outcome, expectedBytes.Length);
+        AssertMasks(metrics, policy, outcome, scenario == "escaped-mask" ? 1 : 0);
+        if (scenario == "original") Assert.NotEqual(expected.Length, expectedBytes.Length);
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Final_check_after_headers_prevents_output_sample_when_deadline_or_client_wins(bool clientCanceled)
+    {
+        using var metrics = new MetricCollector();
+        var budget = Budget(1, ReservedBodyBytes);
+        using var telemetry = new PrivacyTelemetry(budget);
+        var policy = Policy("OutputSizeFinalCheck");
+        using var cancellation = new CancellationTokenSource();
+        var clock = new ManualBlockClock();
+        using var downstream = new ControlledWriteStream();
+        using var invocation = Invocation(telemetry, policy, JsonContent(JsonBody), downstream,
+            cancellation.Token, clock: clock);
+        var checksWithHeaders = 0;
+        clock.TimestampObserved = () =>
+        {
+            if (invocation.Context.HttpContext.Response.ContentLength is null || ++checksWithHeaders != 2) return;
+            clock.TimestampObserved = null;
+            if (clientCanceled) cancellation.Cancel();
+            else clock.Advance(TimeSpan.FromSeconds(10));
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => invocation.ApplyAsync());
+
+        var outcome = clientCanceled ? "canceled" : "timed_out";
+        Assert.Equal(2, checksWithHeaders);
+        Assert.False(downstream.WriteStarted.IsCompleted);
+        Assert.NotNull(invocation.Context.HttpContext.Response.ContentLength);
+        AssertOutcomeAndDuration(metrics, policy, outcome);
+        AssertInputSize(metrics, policy, outcome, Encoding.UTF8.GetByteCount(JsonBody));
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
+        AssertMasks(metrics, policy, outcome, 1);
+        Assert.Equal((0, 0L), budget.Snapshot);
+    }
 
     [Theory]
     [InlineData("Mask", "{\"payment\":{\"cardNumber\":\"é😀\"}}", "inspected")]
@@ -61,7 +256,7 @@ public sealed class PrivacyTelemetryTests
     [InlineData("oversize")]
     [InlineData("read-error")]
     [InlineData("pre-read-error")]
-    public async Task Incomplete_capture_and_preflight_rejection_emit_no_size(string scenario)
+    public async Task Incomplete_capture_and_preflight_rejection_emit_no_input_size_but_prepare_error_output(string scenario)
     {
         using var metrics = new MetricCollector();
         var budget = Budget(1, ReservedBodyBytes);
@@ -83,6 +278,8 @@ public sealed class PrivacyTelemetryTests
         Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", Encoding.UTF8.GetString(downstream.ToArray()));
         AssertOutcomeAndDuration(metrics, policy, "blocked");
         Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        AssertOutputSize(metrics, policy, "blocked", 36);
+        AssertMasks(metrics, policy, "blocked", 0);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -102,6 +299,8 @@ public sealed class PrivacyTelemetryTests
         await invocation.ApplyAsync();
         Assert.Equal(502, invocation.Context.HttpContext.Response.StatusCode);
         AssertInputSize(metrics, policy, "blocked", 3);
+        AssertOutputSize(metrics, policy, "blocked", 36);
+        AssertMasks(metrics, policy, "blocked", 0);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -125,6 +324,7 @@ public sealed class PrivacyTelemetryTests
         Assert.Equal(offset > 0 ? 502 : 200, invocation.Context.HttpContext.Response.StatusCode);
         if (offset > 0) Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
         else AssertInputSize(metrics, policy, "inspected", ReservedBodyBytes + offset);
+        AssertOutputSize(metrics, policy, offset > 0 ? "blocked" : "inspected", offset > 0 ? 36 : ReservedBodyBytes + offset);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -151,7 +351,9 @@ public sealed class PrivacyTelemetryTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => invocation.ApplyAsync());
         AssertOutcomeAndDuration(metrics, policy, clientCanceled ? "canceled" : "timed_out");
         Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
         Assert.Empty(downstream.ToArray());
+        AssertMasks(metrics, policy, clientCanceled ? "canceled" : "timed_out", 0);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -206,7 +408,9 @@ public sealed class PrivacyTelemetryTests
         AssertOutcome(metrics, policy, "capacity_exceeded");
         Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
         Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
         Assert.Equal((1, 1L), budget.Snapshot);
+        AssertMasks(metrics, policy, "capacity_exceeded", 0);
     }
 
     [Fact]
@@ -226,11 +430,15 @@ public sealed class PrivacyTelemetryTests
         Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
 
         Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(Masks, policy.PolicyId));
         downstream.Complete();
         await pending.WaitAsync(TimeSpan.FromSeconds(5));
 
         AssertOutcomeAndDuration(metrics, policy, "inspected");
         AssertInputSize(metrics, policy, "inspected", Encoding.UTF8.GetByteCount(JsonBody));
+        AssertOutputSize(metrics, policy, "inspected", 45);
+        AssertMasks(metrics, policy, "inspected", 1);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -300,6 +508,8 @@ public sealed class PrivacyTelemetryTests
         Assert.False(downstream.WriteStarted.IsCompleted);
         AssertOutcomeAndDuration(metrics, policy, "canceled");
         AssertInputSize(metrics, policy, "canceled", Encoding.UTF8.GetByteCount(JsonBody));
+        AssertMasks(metrics, policy, "canceled", mode == "Mask" ? 1 : 0);
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -323,6 +533,8 @@ public sealed class PrivacyTelemetryTests
         Assert.False(downstream.WriteStarted.IsCompleted);
         AssertOutcomeAndDuration(metrics, policy, "faulted");
         AssertInputSize(metrics, policy, "faulted", Encoding.UTF8.GetByteCount(JsonBody));
+        AssertMasks(metrics, policy, "faulted", mode == "Mask" ? 1 : 0);
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -369,6 +581,10 @@ public sealed class PrivacyTelemetryTests
         AssertOutcomeAndDuration(metrics, writeError, "write_error");
         AssertInputSize(metrics, canceled, "canceled", Encoding.UTF8.GetByteCount(JsonBody));
         AssertInputSize(metrics, writeError, "write_error", Encoding.UTF8.GetByteCount(JsonBody));
+        AssertOutputSize(metrics, canceled, "canceled", 45);
+        AssertOutputSize(metrics, writeError, "write_error", 45);
+        AssertMasks(metrics, canceled, "canceled", 1);
+        AssertMasks(metrics, writeError, "write_error", 1);
     }
 
     [Theory]
@@ -398,7 +614,9 @@ public sealed class PrivacyTelemetryTests
         AssertOutcomeAndDuration(metrics, policy, "canceled");
         Assert.Equal((0, 0L), budget.Snapshot);
         Assert.Empty(downstream.ToArray());
+        AssertMasks(metrics, policy, "canceled", 0);
         Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
     }
 
     [Fact]
@@ -417,6 +635,7 @@ public sealed class PrivacyTelemetryTests
         measurement.Complete(PrivacyInspectionOutcome.Inspected);
 
         AssertOutcomeAndDuration(metrics, policy, "faulted");
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -431,6 +650,7 @@ public sealed class PrivacyTelemetryTests
         Assert.NotNull(measurement);
 
         measurement.CapturedInputBodyBytes = 17;
+        measurement.PreparedOutputBodyBytes = 23;
         Parallel.For(0, 100, index => measurement.Complete(index % 2 == 0
             ? PrivacyInspectionOutcome.Inspected
             : PrivacyInspectionOutcome.Canceled));
@@ -440,6 +660,7 @@ public sealed class PrivacyTelemetryTests
         Assert.Single(metrics.ForPolicy(Duration, policy.PolicyId));
         measurement.Dispose();
         AssertInputSize(metrics, policy, outcome.Tags["gateway.privacy.outcome"]!, 17);
+        AssertOutputSize(metrics, policy, outcome.Tags["gateway.privacy.outcome"]!, 23);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -496,6 +717,8 @@ public sealed class PrivacyTelemetryTests
             Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
             Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
             Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+            Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
+            AssertMasks(metrics, policy, "inspected", 0);
         }
 
         Assert.Equal((0, 0L), budget.Snapshot);
@@ -530,6 +753,9 @@ public sealed class PrivacyTelemetryTests
             Assert.Contains(SyntheticApi.Pan, body);
             Assert.Empty(metrics.ForPolicy(Outcomes, policyId));
             Assert.Empty(metrics.ForPolicy(Duration, policyId));
+            Assert.Empty(metrics.ForPolicy(InputSize, policyId));
+            Assert.Empty(metrics.ForPolicy(OutputSize, policyId));
+            Assert.Empty(metrics.ForPolicy(Masks, policyId));
         }
         finally
         {
@@ -551,6 +777,11 @@ public sealed class PrivacyTelemetryTests
     [InlineData(InputSize, true, "Mask")]
     [InlineData(InputSize, false, "Block")]
     [InlineData(InputSize, true, "Block")]
+    [InlineData(OutputSize, false, "Mask")]
+    [InlineData(OutputSize, true, "Mask")]
+    [InlineData(OutputSize, false, "Block")]
+    [InlineData(OutputSize, true, "Block")]
+    [InlineData(Masks, false, "Mask")]
     public async Task Throwing_listener_preserves_masked_or_blocked_HTTP_response(string instrument, bool blocked, string mode)
     {
         var policy = Policy("TelemetryThrowingHttp") with { Mode = mode };
@@ -570,6 +801,9 @@ public sealed class PrivacyTelemetryTests
         AssertOutcomeAndDuration(metrics, policy, blocked ? "blocked" : mode == "Block" ? "policy_blocked" : "inspected");
         AssertInputSize(metrics, policy, blocked ? "blocked" : mode == "Block" ? "policy_blocked" : "inspected",
             blocked ? 8 : Encoding.UTF8.GetByteCount(JsonBody));
+        AssertOutputSize(metrics, policy, blocked ? "blocked" : mode == "Block" ? "policy_blocked" : "inspected",
+            blocked ? 36 : mode == "Block" ? 35 : 45);
+        AssertMasks(metrics, policy, "inspected", !blocked && mode == "Mask" ? 1 : 0);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
@@ -600,6 +834,8 @@ public sealed class PrivacyTelemetryTests
     [InlineData(Outcomes)]
     [InlineData(Duration)]
     [InlineData(InputSize)]
+    [InlineData(OutputSize)]
+    [InlineData(Masks)]
     [InlineData("*")]
     public void Throwing_listeners_keep_concurrent_and_repeated_completion_idempotent(string instrument)
     {
@@ -611,12 +847,16 @@ public sealed class PrivacyTelemetryTests
         Assert.NotNull(measurement);
 
         measurement.CapturedInputBodyBytes = 0;
+        measurement.PreparedOutputBodyBytes = 0;
+        measurement.ValidatedMasks = 3;
         Parallel.For(0, 100, _ => measurement.Complete(PrivacyInspectionOutcome.Inspected));
         measurement.Complete(PrivacyInspectionOutcome.Canceled);
         measurement.Dispose();
 
         AssertOutcomeAndDuration(metrics, policy, "inspected");
         AssertInputSize(metrics, policy, "inspected", 0);
+        AssertOutputSize(metrics, policy, "inspected", 0);
+        AssertMasks(metrics, policy, "inspected", 3);
         Assert.Equal((0, 0L), budget.Snapshot);
         using var next = telemetry.TryStartInspection(Policy("TelemetryAfterThrowingConcurrent"));
         Assert.NotNull(next);
@@ -632,6 +872,12 @@ public sealed class PrivacyTelemetryTests
     [InlineData(Duration, false)]
     [InlineData(Outcomes, true)]
     [InlineData(Duration, true)]
+    [InlineData(InputSize, false)]
+    [InlineData(InputSize, true)]
+    [InlineData(OutputSize, false)]
+    [InlineData(OutputSize, true)]
+    [InlineData(Masks, false)]
+    [InlineData(Masks, true)]
     public async Task Throwing_listener_preserves_original_error_or_cancellation(string instrument, bool canceled)
     {
         var policy = Policy("TelemetryThrowingOriginalFailure");
@@ -660,12 +906,18 @@ public sealed class PrivacyTelemetryTests
         }
 
         AssertOutcomeAndDuration(metrics, policy, canceled ? "canceled" : "write_error");
+        AssertInputSize(metrics, policy, canceled ? "canceled" : "write_error", Encoding.UTF8.GetByteCount(JsonBody));
+        AssertOutputSize(metrics, policy, canceled ? "canceled" : "write_error", 45);
+        AssertMasks(metrics, policy, canceled ? "canceled" : "write_error", 1);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
     [Theory]
     [InlineData(Outcomes)]
     [InlineData(Duration)]
+    [InlineData(InputSize)]
+    [InlineData(OutputSize)]
+    [InlineData(Masks)]
     public void Listener_cancellation_does_not_cancel_successful_inspection(string instrument)
     {
         var policy = Policy("TelemetryListenerCancellation");
@@ -675,15 +927,24 @@ public sealed class PrivacyTelemetryTests
         using var measurement = telemetry.TryStartInspection(policy);
         Assert.NotNull(measurement);
 
+        measurement.CapturedInputBodyBytes = 17;
+        measurement.PreparedOutputBodyBytes = 23;
+        measurement.ValidatedMasks = 2;
         measurement.Complete(PrivacyInspectionOutcome.Inspected);
 
         AssertOutcomeAndDuration(metrics, policy, "inspected");
+        AssertInputSize(metrics, policy, "inspected", 17);
+        AssertOutputSize(metrics, policy, "inspected", 23);
+        AssertMasks(metrics, policy, "inspected", 2);
         Assert.Equal((0, 0L), budget.Snapshot);
     }
 
     [Theory]
     [InlineData(Outcomes)]
     [InlineData(Duration)]
+    [InlineData(InputSize)]
+    [InlineData(OutputSize)]
+    [InlineData(Masks)]
     public void Listener_out_of_memory_is_not_hidden_and_lease_is_released(string instrument)
     {
         var policy = Policy("TelemetryListenerOutOfMemory");
@@ -694,6 +955,9 @@ public sealed class PrivacyTelemetryTests
         using var measurement = telemetry.TryStartInspection(policy);
         Assert.NotNull(measurement);
 
+        measurement.CapturedInputBodyBytes = 17;
+        measurement.PreparedOutputBodyBytes = 23;
+        measurement.ValidatedMasks = 2;
         var actual = Assert.Throws<OutOfMemoryException>(() => measurement.Complete(PrivacyInspectionOutcome.Inspected));
 
         Assert.Same(failure, actual);
@@ -717,6 +981,8 @@ public sealed class PrivacyTelemetryTests
         Assert.Throws<ArgumentOutOfRangeException>(() => measurement.Complete(outcome));
         Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
         Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
         measurement.Dispose();
         Assert.Equal((0, 0L), budget.Snapshot);
     }
@@ -754,6 +1020,7 @@ public sealed class PrivacyTelemetryTests
         Assert.Equal((0, 0L), budget.Snapshot);
         Assert.Equal(6, (int)PrivacyInspectionOutcome.TimedOut);
         Assert.Equal(7, (int)PrivacyInspectionOutcome.PolicyBlocked);
+        AssertMasks(metrics, policy, outcome, 0);
     }
 
     [Theory]
@@ -790,6 +1057,8 @@ public sealed class PrivacyTelemetryTests
         Assert.Null(budget.TryAcquire(ReservedBodyBytes));
         Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
         Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
+        Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
         var failure = new IOException("Synthetic block downstream failure.");
         if (outcome == "write_error") downstream.Fail(failure);
         else downstream.Complete();
@@ -800,6 +1069,8 @@ public sealed class PrivacyTelemetryTests
         else await pending.WaitAsync(TimeSpan.FromSeconds(5));
         AssertOutcomeAndDuration(metrics, policy, outcome);
         AssertInputSize(metrics, policy, outcome, Encoding.UTF8.GetByteCount(JsonBody));
+        AssertOutputSize(metrics, policy, outcome, 35);
+        AssertMasks(metrics, policy, outcome, 0);
         Assert.Equal((0, 0L), budget.Snapshot);
         Assert.Equal(0, admission.ActiveRequests);
         using var proxyRecovered = admission.TryAcquire();
@@ -814,7 +1085,8 @@ public sealed class PrivacyTelemetryTests
         private long ticks;
         private readonly List<ManualTimer> timers = [];
         public override long TimestampFrequency => TimeSpan.TicksPerSecond;
-        public override long GetTimestamp() => Interlocked.Read(ref ticks);
+        public Action? TimestampObserved { get; set; }
+        public override long GetTimestamp() { TimestampObserved?.Invoke(); return Interlocked.Read(ref ticks); }
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
             var timer = new ManualTimer(this, callback, state);
@@ -839,8 +1111,35 @@ public sealed class PrivacyTelemetryTests
     }
 
     private static void AssertInputSize(MetricCollector metrics, CompiledPanPolicy policy, string outcome, long bytes)
+        => AssertBodySize(metrics, policy, outcome, bytes, InputSize);
+
+    private static void AssertMasks(MetricCollector metrics, CompiledPanPolicy policy, string outcome, long count)
     {
-        var size = Assert.Single(metrics.ForPolicy(InputSize, policy.PolicyId));
+        var samples = metrics.ForPolicy(Masks, policy.PolicyId);
+        if (count == 0) { Assert.Empty(samples); return; }
+        var sample = Assert.Single(samples);
+        Assert.Equal(count, sample.Value);
+        Assert.Equal("{mask}", sample.Unit);
+        Assert.IsType<Counter<long>>(sample.Instrument);
+        var terminal = Assert.Single(metrics.ForPolicy(Outcomes, policy.PolicyId));
+        Assert.Same(terminal.Meter, sample.Meter);
+        Assert.Equal("Gateway.Privacy", sample.Meter.Name);
+        Assert.Equal("1.0.0", sample.Meter.Version);
+        Assert.Equal(new Dictionary<string, string?>
+        {
+            ["gateway.route.id"] = policy.RouteId,
+            ["gateway.policy.id"] = policy.PolicyId,
+            ["gateway.policy.version"] = policy.Version,
+            ["gateway.privacy.outcome"] = outcome
+        }.OrderBy(tag => tag.Key), sample.Tags.OrderBy(tag => tag.Key));
+    }
+
+    private static void AssertOutputSize(MetricCollector metrics, CompiledPanPolicy policy, string outcome, long bytes)
+        => AssertBodySize(metrics, policy, outcome, bytes, OutputSize);
+
+    private static void AssertBodySize(MetricCollector metrics, CompiledPanPolicy policy, string outcome, long bytes, string instrument)
+    {
+        var size = Assert.Single(metrics.ForPolicy(instrument, policy.PolicyId));
         Assert.Equal(bytes, size.Value);
         Assert.Equal("By", size.Unit);
         Assert.IsType<Histogram<long>>(size.Instrument);
@@ -991,7 +1290,7 @@ public sealed class PrivacyTelemetryTests
             measurements.Enqueue(new CapturedMeasurement(instrument.Name, instrument.Unit,
                 Convert.ToDouble(value), capturedTags, instrument.Meter, instrument));
             // Match a test-specific policy, not every Gateway meter in this process.
-            // Capture before throwing to prove both independent publications were attempted.
+            // Capture before throwing to prove all independent publications were attempted.
             if ((failingInstrument == instrument.Name || failingInstrument == "*")
                 && capturedTags.GetValueOrDefault("gateway.policy.id") == failingPolicyId)
                 throw listenerFailure;

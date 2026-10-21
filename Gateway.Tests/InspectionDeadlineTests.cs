@@ -250,7 +250,9 @@ public sealed class InspectionDeadlineTests
         using var recovered = fixture.Budget.TryAcquire(1024);
         Assert.NotNull(recovered);
         fixture.AssertMetrics("timed_out", phase == "cleanup" ? 1375 : 1000,
-            expectedInputBytes: phase == "read" ? null : Encoding.UTF8.GetByteCount(Json));
+            expectedInputBytes: phase == "read" ? null : Encoding.UTF8.GetByteCount(Json),
+            expectedOutputBytes: phase == "write" ? 45 : null,
+            expectedMasks: phase == "read" ? 0 : 1);
     }
 
     [Fact]
@@ -334,7 +336,7 @@ public sealed class InspectionDeadlineTests
         }
         else await pending;
         fixture.AssertMetrics(expired ? "timed_out" : "inspected", milliseconds,
-            expectedInputBytes: Encoding.UTF8.GetByteCount(Json));
+            expectedInputBytes: Encoding.UTF8.GetByteCount(Json), expectedOutputBytes: expired ? null : 45, expectedMasks: 1);
     }
 
     [Theory]
@@ -349,7 +351,8 @@ public sealed class InspectionDeadlineTests
         Assert.Equal(invalid ? 502 : 200, fixture.Context.HttpContext.Response.StatusCode);
         Assert.Equal(invalid ? "{\"code\":\"privacy_inspection_failed\"}" : Json.Replace("4111111111111111", "************1111"), Encoding.UTF8.GetString(fixture.Output.ToArray()));
         fixture.AssertMetrics(invalid ? "blocked" : "inspected", 0,
-            expectedInputBytes: invalid ? 1 : Encoding.UTF8.GetByteCount(Json));
+            expectedInputBytes: invalid ? 1 : Encoding.UTF8.GetByteCount(Json), expectedOutputBytes: invalid ? 36 : 45,
+            expectedMasks: invalid ? 0 : 1);
     }
 
     private sealed class Fixture : IDisposable
@@ -398,24 +401,41 @@ public sealed class InspectionDeadlineTests
         }
 
         public Task Run() => transform.ApplyAsync(Context, policy).AsTask();
-        public void AssertMetrics(string outcome, double expectedMilliseconds = 1000, long? expectedInputBytes = null)
+        public void AssertMetrics(string outcome, double expectedMilliseconds = 1000, long? expectedInputBytes = null,
+            long? expectedOutputBytes = null, long expectedMasks = 0)
         {
-            Assert.Equal(expectedInputBytes.HasValue ? 3 : 2, Metrics.Count);
+            Assert.Equal(2 + (expectedInputBytes.HasValue ? 1 : 0) + (expectedOutputBytes.HasValue ? 1 : 0) + (expectedMasks > 0 ? 1 : 0), Metrics.Count);
             Assert.Equal(1, Assert.Single(Metrics, m => m.Instrument == "gateway.privacy.inspection.outcomes" && m.Outcome == outcome).Value);
             Assert.Equal(expectedMilliseconds, Assert.Single(Metrics, m => m.Instrument == "gateway.privacy.inspection.duration" && m.Outcome == outcome).Value);
-            var sizes = Metrics.Where(m => m.Instrument == "gateway.privacy.inspection.input_body_bytes");
-            if (expectedInputBytes is { } bytes)
+            AssertSize("gateway.privacy.inspection.input_body_bytes", expectedInputBytes);
+            AssertSize("gateway.privacy.inspection.output_body_bytes", expectedOutputBytes);
+            var masks = Metrics.Where(m => m.Instrument == "gateway.privacy.inspection.masks");
+            if (expectedMasks > 0)
             {
-                var size = Assert.Single(sizes);
-                Assert.Equal(bytes, size.Value);
-                Assert.IsType<Histogram<long>>(size.Source);
-                Assert.Equal("By", size.Source.Unit);
-                Assert.Equal("Gateway.Privacy", size.Source.Meter.Name);
-                Assert.Equal("1.0.0", size.Source.Meter.Version);
+                var sample = Assert.Single(masks);
+                Assert.Equal(expectedMasks, sample.Value);
+                Assert.IsType<Counter<long>>(sample.Source);
+                Assert.Equal("{mask}", sample.Source.Unit);
                 Assert.Same(Assert.Single(Metrics, m => m.Instrument == "gateway.privacy.inspection.outcomes").Source.Meter,
-                    size.Source.Meter);
+                    sample.Source.Meter);
             }
-            else Assert.Empty(sizes);
+            else Assert.Empty(masks);
+            void AssertSize(string instrument, long? expectedBytes)
+            {
+                var sizes = Metrics.Where(m => m.Instrument == instrument);
+                if (expectedBytes is { } bytes)
+                {
+                    var size = Assert.Single(sizes);
+                    Assert.Equal(bytes, size.Value);
+                    Assert.IsType<Histogram<long>>(size.Source);
+                    Assert.Equal("By", size.Source.Unit);
+                    Assert.Equal("Gateway.Privacy", size.Source.Meter.Name);
+                    Assert.Equal("1.0.0", size.Source.Meter.Version);
+                    Assert.Same(Assert.Single(Metrics, m => m.Instrument == "gateway.privacy.inspection.outcomes").Source.Meter,
+                        size.Source.Meter);
+                }
+                else Assert.Empty(sizes);
+            }
             var expected = new Dictionary<string, object?>
             {
                 ["gateway.policy.id"] = policy.PolicyId,

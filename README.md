@@ -1,4 +1,4 @@
-# MVP-20 — RF07 Block y política PAN configurable
+# MVP-23 — PAN configurable y máscaras calculadas
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -293,6 +293,8 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
 | `gateway.privacy.inspection.outcomes` | `Counter<long>` | `{inspection}` |
 | `gateway.privacy.inspection.duration` | `Histogram<double>` | `ms` |
 | `gateway.privacy.inspection.input_body_bytes` | `Histogram<long>` | `By` |
+| `gateway.privacy.inspection.output_body_bytes` | `Histogram<long>` | `By` |
+| `gateway.privacy.inspection.masks` | `Counter<long>` | `{mask}` |
 | `gateway.privacy.inspection.active` | `ObservableGauge<int>` | `{inspection}` |
 | `gateway.privacy.inspection.reserved_body_bytes` | `ObservableGauge<long>` | `By` |
 
@@ -345,6 +347,71 @@ exporter ni campaña de sizing. MVP-21: build Release sin errores/advertencias,
 suite completa **410/410 PASS** sin omitidos y revisión independiente estática
 **APPROVED**. RF11 completo sigue pendiente; esto no acredita RNF03 ni aprobación
 del producto.
+
+### Tamaño de salida preparada (MVP-22, RF11 parcial)
+
+`gateway.privacy.inspection.output_body_bytes` mide la longitud exacta en bytes
+del cuerpo final preparado para escritura, no caracteres, bytes entregados al
+cliente, tamaño de entrada ni memoria reservada. Se marca inmediatamente antes
+de `WriteAsync`, después de preparar los headers y superar el último chequeo
+de deadline/cancelación. Incluye el cuerpo enmascarado, el original conservado
+sin coincidencias y los errores genéricos de inspección o de política Block;
+nunca mide el buffer transformado descartado por Block.
+
+Solo se intenta publicar una muestra terminal en `Complete`, tras el cleanup,
+con el outcome final y junto a los otros instrumentos. Una escritura pendiente
+no publica todavía; si luego falla, se cancela o vence el deadline, se conserva
+el tamaño preparado con `write_error`, `canceled` o `timed_out`. La muestra no
+certifica entrega total ni parcial al cliente.
+
+No hay muestra si no se alcanza el punto de marca: rechazo por capacidad,
+HEAD/204/304/non-JSON/passthrough o terminación anterior por cancelación, deadline
+o fallo. Ausencia no significa cero. Un rechazo prelectura o captura incompleta
+sí puede registrar salida si se prepara y se intenta escribir el error genérico,
+aunque no exista muestra de entrada. No es una distribución de todo el tráfico.
+
+Usa el Meter/version actuales y exclusivamente las cuatro tags acotadas; no
+añade cuerpos, valores, selectores ni identificadores. Las cuatro publicaciones
+(outcome, duración, entrada y salida) aíslan independientemente excepciones
+ordinarias del consumidor. Son best effort y no atómicas; callbacks bloqueantes
+mantienen las limitaciones existentes, sin liberar capacidad anticipadamente.
+
+Compatibilidad aditiva: consumidores pueden incorporar el nombre antes de
+actualizar el binario y reiniciar; rollback deja de emitirlo. Sin migraciones,
+dependencias, cambios HTTP, configuración, defaults, modos ni límites nuevos.
+No añade contadores de máscaras/hallazgos ni detección, Observe, exporter o BD.
+No hubo benchmark, sizing ni despliegue. MVP-22: build Release de la solución sin
+errores/advertencias, focalizados **124/124 PASS** y suite completa **431/431 PASS**,
+sin omitidos; revisión independiente estática **APPROVED**. RF11 sigue parcial; no acredita
+RNF03 ni aprobación del producto.
+
+### Máscaras calculadas validadas (MVP-23, RF11 parcial)
+
+`gateway.privacy.inspection.masks` cuenta sustituciones string calculadas por
+Mask, no hallazgos/detección PAN ni máscaras entregadas. Cada terminal string
+seleccionado cuenta, incluido vacío, corto o incompatible; se recorren todos los
+duplicados y arrays. `null`, ausencia de coincidencias y Block no cuentan.
+
+Solo se conserva el conteo tras terminar el recorrido completo válido y superar
+su `deadline.Check`. Un fallo tardío de traversal descarta todo conteo parcial.
+Una vez validado, fallos posteriores en checkpoint diagnóstico, headers, escritura,
+cancelación o deadline conservan el conteo. Solo se intenta `Add` si es positivo,
+en `Complete` tras cleanup, con el outcome final y el mismo Meter/version y las
+cuatro tags acotadas. Una escritura/limpieza pendiente aún no publica. Cada
+instrumento aísla independientemente excepciones ordinarias del consumidor; la
+publicación sigue siendo best effort, no atómica, sin aislar callbacks bloqueantes.
+
+Sin muestra por capacidad, exclusiones, passthrough, prelectura o invalidez antes
+de la marca. Ausencia no equivale a cero ni a ausencia de PAN. Compatibilidad
+aditiva: consumidores con filtros de nombre pueden incorporar el instrumento
+antes de actualizar binario y reiniciar; rollback deja de emitirlo. Sin cambios
+HTTP, modos, defaults, tags, límites, dependencias ni migraciones. Sin exporter,
+benchmark, sizing ni despliegue. Build Release sin errores/advertencias,
+focalizados **139/139 PASS** y suite completa **446/446 PASS**, sin omitidos.
+Revisión independiente estática **APPROVED_WITH_WARNINGS**: el test
+`Masks_require_post_traversal_deadline_check` observa el límite mediante StackTrace
+y depende del JIT/inlining/runtime; revisar ese observador al actualizar runtime.
+RF11 sigue parcial y esto no aprueba el producto ni RNF03.
 
 ### Aislamiento de consumidores de métricas (MVP-12)
 
