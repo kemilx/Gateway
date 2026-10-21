@@ -1,4 +1,4 @@
-# MVP-23 — PAN configurable y máscaras calculadas
+# MVP-24 — Panel local de consulta y privacidad PAN
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,60 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Panel local de consulta (MVP-24)
+
+Tras ejecutar Gateway como se indica arriba, abrir [panel local](http://127.0.0.1:5100/dashboard/)
+en el listener existente. HTML, JS y CSS
+se sirven embebidos, sin CDN; `GET /dashboard/api/summary` devuelve schemaVersion 1,
+inicio UTC, salud local, metadatos permitidos de políticas Mask/Block y totales de
+inspección por instancia desde su construcción. No expone selectores, destinos,
+URLs, cuerpos, PAN, tokens, excepciones ni correlaciones. No hay edición, BD,
+CORS, exporter ni datos reales. La demo es una **SIMULACIÓN** fija en el navegador:
+no llama al upstream ni incrementa métricas.
+
+Solo admite cliente IP loopback y Host `localhost` exacto o IP loopback (puerto
+permitido solo si coincide con el puerto local efectivo; sin puerto usa 80/443
+según HTTP/HTTPS); rechaza nombres arbitrarios, punto final, zonas IPv6,
+subdominios `.localhost` e IPv4-mapped
+con 403 genérico antes de consultar datos/recursos. No sustituye autenticación
+frente a otros procesos locales: **sin autenticación, cualquier proceso local puede
+consultarlo**. Rechaza `Sec-Fetch-Site: cross-site` y Origin presente distinto del
+origen validado (sin paths, userinfo ni sufijos); no confía en forwarded headers.
+Usa no-store, nosniff, no-referrer, CORP same-origin y CSP restrictiva.
+HEAD no entrega cuerpo; otros métodos se rechazan sin mutaciones.
+
+Los acumuladores tienen memoria fija, no retienen eventos ni muestras individuales
+y no dependen de MeterListener. Se actualizan antes de callbacks externos; los
+instrumentos, tags y cleanup conservan su contrato. Entrada/salida cuentan solo
+marcas nullable existentes (incluido cero); máscaras solo conteos positivos
+validados. Duración muestra conteo/suma, no percentiles. Snapshots y gauges son
+observacionales, no una transacción con HTTP ni entre totales y capacidad.
+Ready conserva el contrato de health: no indica upstream disponible ni capacidad.
+El panel queda fuera de admisión proxy y no contacta al upstream.
+Los totales long/double saturan en su máximo finito en vez de hacer wrap; tras
+saturación no conservan exactitud incremental. Presupuesto independiente fijo de
+**4 solicitudes dashboard concurrentes**, sin cola: exceso devuelve 503 vacío,
+sin detalles, y el permiso se libera en finally solo al retornar el trabajo real
+de escritura (no por timer ni cancelación). No modifica límites Kestrel ni proxy.
+Permanecen los defaults de transporte Kestrel: conexiones concurrentes sin límite
+explícito y timeouts/rates predeterminados del framework. Este límite de aplicación
+no es una garantía dura de memoria, conexiones o disponibilidad: un proceso local
+puede retener IO/conexiones y causar DoS residual. Los enlaces `evidence/` históricos
+son evidencia local ignorada, no se publican desde el panel ni se versionan aquí.
+
+Compatibilidad aditiva: incorporar binario con recursos embebidos y reiniciar;
+sin migraciones, dependencias ni configuración nueva. Sin despliegue realizado
+ni autorización para datos reales o producción.
+
+Validación local: build Release sin errores/advertencias, focalizados **129/129**
+y suite completa **502/502 PASS**, sin omitidos. Edge headless: **6/6 PASS**
+(carga real, demo aislada, error/recuperación, disposición a 320 px, errores JS/CSP
+y lectura cross-origin denegada). Revisión independiente estática de código y
+seguridad: **APPROVED_WITH_WARNINGS**, sin bloqueantes para este alcance local.
+Los números mayores que `Number.MAX_SAFE_INTEGER` pueden mostrarse redondeados
+en el navegador; los acumuladores del servidor conservan su contrato de saturación.
+No se certifica accesibilidad exhaustiva con lector de pantalla ni rendimiento.
 
 ### Salud local RF13 (MVP-17)
 

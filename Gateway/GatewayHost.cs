@@ -52,6 +52,7 @@ public static class GatewayHost
         builder.Services.AddSingleton<UpstreamHeadersDeadlineSettings>();
         Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<TimeProvider>(builder.Services, TimeProvider.System);
         builder.Services.AddSingleton<PrivacyTelemetry>();
+        builder.Services.AddSingleton<DashboardBudget>();
         builder.Services.AddSingleton<PanResponseTransform>();
         builder.Services.AddReverseProxy()
             .LoadFromMemory(
@@ -91,6 +92,7 @@ public static class GatewayHost
             app.UseRouting();
             app.UseMiddleware<ProxyAdmissionMiddleware>();
             app.MapReverseProxy();
+            app.MapGatewayDashboard(routes.Select(route => route.RouteId));
             // Resolve explicitly before publishing local readiness; invalid PAN configuration must fail startup.
             app.Services.GetRequiredService<PanPolicyCatalog>();
             app.MapGatewayHealth();

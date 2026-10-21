@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>YARP Privacy Gateway · Panel local</title>
+  <link rel="stylesheet" href="/dashboard/styles.css">
+  <script src="/dashboard/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#contenido">Saltar al contenido</a>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">Y</span><div><strong>YARP Privacy Gateway</strong><span>Panel de observación / MVP24</span></div></div>
+    <span class="local-badge">Entorno local</span>
+  </header>
+  <div class="notice">Local · datos sintéticos · solo consulta · no aprobado para producción</div>
+  <main id="contenido" tabindex="-1">
+    <section class="page-heading" aria-labelledby="titulo">
+      <div><p class="eyebrow">Visibilidad, sin intervención</p><h1 id="titulo">Resumen de la instancia</h1><p class="subtitle">Actividad agregada desde el arranque. Sin contenido de solicitudes ni respuestas.</p></div>
+      <div class="refresh-controls"><button id="refresh" type="button">Actualizar</button><label class="auto-label"><input id="auto-refresh" type="checkbox"> Actualizar cada 5 s</label></div>
+    </section>
+    <div class="data-bar"><p id="request-state">Cargando el resumen…</p><p id="updated-at">Aún no hay datos recibidos.</p></div>
+    <p id="announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+    <div id="error-notice" class="error-notice" hidden><strong>No se pudo actualizar el resumen.</strong> <span id="error-detail">Comprueba que el servicio esté disponible y vuelve a intentarlo.</span></div>
+    <div id="summary" aria-busy="true">
+      <section class="health-grid" aria-label="Estado de la instancia">
+        <article class="card"><h2>Servicio</h2><p id="live" class="health-value">Sin datos</p><p>Estado de vida de esta instancia.</p></article>
+        <article class="card"><h2>Preparación</h2><p id="ready" class="health-value">Sin datos</p><p>No garantiza disponibilidad del upstream ni capacidad para nuevas inspecciones.</p></article>
+        <article class="card"><h2>Inicio de la instancia</h2><p id="started-at" class="start-value">Sin datos</p><p>Los contadores se reinician al reiniciar la instancia.</p></article>
+      </section>
+      <section class="section" aria-labelledby="actividad">
+        <div class="section-heading"><div><p class="eyebrow">En este momento</p><h2 id="actividad">Recursos y máscaras</h2></div></div>
+        <div class="metrics-grid">
+          <article class="card"><h3>Inspecciones activas</h3><p id="active" class="metric">—</p><p>Trabajo en curso, no capacidad disponible.</p></article>
+          <article class="card"><h3>Memoria reservada</h3><p id="reserved" class="metric">—</p><p>Bytes reservados para cuerpos.</p></article>
+          <article class="card"><h3>Máscaras validadas</h3><p id="masks" class="metric">—</p><p>Máscaras calculadas; no representan hallazgos PAN ni entrega efectiva al cliente.</p></article>
+        </div>
+      </section>
+      <section class="section" aria-labelledby="resultados">
+        <div class="section-heading"><div><p class="eyebrow">Contadores acumulados</p><h2 id="resultados">Resultados de inspección</h2></div></div>
+        <p class="section-description">Cada contador se presenta de forma independiente; no se calculan porcentajes ni se asume una suma total.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Resultados de inspección; desplazar si es necesario"><table><caption class="sr-only">Contadores de resultados desde el arranque</caption><thead><tr><th scope="col">Resultado</th><th scope="col">Contador</th><th scope="col">Referencia</th></tr></thead><tbody id="outcomes"><tr><td colspan="3">Aún no hay datos recibidos.</td></tr></tbody></table></div>
+      </section>
+      <section class="section" aria-labelledby="volumen">
+        <div class="section-heading"><div><p class="eyebrow">Volumen observado</p><h2 id="volumen">Captura y preparación</h2></div></div>
+        <div class="metrics-grid">
+          <article class="card"><h3>Entrada · captura completa</h3><p id="input-total" class="metric">—</p><p id="input-samples">Muestras: sin datos</p><p>No incluye capturas incompletas.</p></article>
+          <article class="card"><h3>Salida · preparada</h3><p id="output-total" class="metric">—</p><p id="output-samples">Muestras: sin datos</p><p>Contenido preparado, no necesariamente entregado.</p></article>
+          <article class="card"><h3>Duración media</h3><p id="duration-mean" class="metric">—</p><p id="duration-samples">Muestras: sin datos</p><p id="duration-total">Total acumulado: sin datos</p><p>Media aritmética; no son percentiles.</p></article>
+        </div>
+      </section>
+      <section class="section" aria-labelledby="politicas">
+        <div class="section-heading"><div><p class="eyebrow">Configuración observada</p><h2 id="politicas">Políticas por ruta</h2></div><span class="read-only">Solo lectura</span></div>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Políticas por ruta; desplazar para ver todas las columnas"><table><caption class="sr-only">Políticas de esta instancia, sin destinos ni controles de edición</caption><thead><tr><th scope="col">Ruta</th><th scope="col">Política</th><th scope="col">Versión</th><th scope="col">Modo</th><th scope="col">Límite del cuerpo (bytes)</th></tr></thead><tbody id="policies"><tr><td colspan="5">Aún no hay datos recibidos.</td></tr></tbody></table></div>
+      </section>
+    </div>
+    <aside class="observation-note" aria-label="Alcance de los datos"><strong>Una vista observacional, no una auditoría.</strong> Las capturas son agregadas por instancia, no atómicas: los valores pueden cambiar mientras se obtiene el resumen. Cero es un contador recibido; «sin muestras» indica ausencia de observaciones para calcular una media.</aside>
+    <section class="demo section" aria-labelledby="demo-title">
+      <div><p class="eyebrow">Demostración aislada</p><h2 id="demo-title">Explora la presentación</h2><p>Simulación de interfaz: no ejecuta inspección ni modifica métricas</p><p>No cambia la configuración real ni envía solicitudes a ninguna API.</p></div>
+      <div class="demo-workbench"><div class="demo-modes" role="group" aria-label="Modo de la simulación local"><button id="demo-mask" type="button" aria-pressed="true">Mask</button><button id="demo-block" type="button" aria-pressed="false">Block</button></div><p class="synthetic">Entrada fija: <code>[DATO SINTÉTICO]</code></p><button id="demo-run" type="button" class="secondary">Ejecutar simulación local</button><p id="demo-result" class="demo-result" role="status" aria-live="polite" aria-atomic="true">Sin ejecutar.</p></div>
+    </section>
+  </main>
+  <footer>YARP Privacy Gateway <span aria-hidden="true">/</span> MVP24 · Observación local, sin acciones sobre el tráfico.</footer>
+</body>
+</html>

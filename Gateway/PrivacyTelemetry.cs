@@ -21,6 +21,29 @@ public sealed class PrivacyTelemetry : IDisposable
     public const string MeterVersion = "1.0.0";
 
     private readonly InspectionBudget budget;
+    private readonly object totalsGate = new();
+    private readonly long[] outcomeTotals = new long[8];
+    private long maskTotal, inputSamples, inputTotal, outputSamples, outputTotal, durationSamples;
+    private double durationTotal;
+    internal static long SaturatingAdd(long total, long value) => value <= 0 ? total
+        : total > long.MaxValue - value ? long.MaxValue : total + value;
+    internal static double SaturatingAdd(double total, double value) => value <= 0 ? total
+        : !double.IsFinite(value) || total > double.MaxValue - value ? double.MaxValue : total + value;
+
+    internal DashboardMetrics DashboardMetrics
+    {
+        get
+        {
+            lock (totalsGate)
+            {
+                var gauges = budget.Snapshot;
+                return new(new(outcomeTotals[0], outcomeTotals[1], outcomeTotals[2], outcomeTotals[3],
+                    outcomeTotals[4], outcomeTotals[5], outcomeTotals[6], outcomeTotals[7]), maskTotal,
+                    new(inputSamples, inputTotal), new(outputSamples, outputTotal),
+                    new(durationSamples, durationTotal), gauges.ActiveInspections, gauges.ReservedBodyBytes);
+            }
+        }
+    }
     internal TimeSpan InspectionTimeout => budget.InspectionTimeout;
     private readonly Meter meter = new(MeterName, MeterVersion);
     private readonly Counter<long> outcomes;
@@ -76,6 +99,16 @@ public sealed class PrivacyTelemetry : IDisposable
             { "gateway.policy.version", policy.Version },
             { "gateway.privacy.outcome", GetOutcomeName(outcome) }
         };
+        // Instance-owned, fixed-size accounting precedes all external synchronous callbacks.
+        // No samples, events, policy identifiers or response data are retained here.
+        lock (totalsGate)
+        {
+            outcomeTotals[(int)outcome] = SaturatingAdd(outcomeTotals[(int)outcome], 1);
+            maskTotal = SaturatingAdd(maskTotal, validatedMasks);
+            if (capturedInputBodyBytes is { } input) { inputSamples = SaturatingAdd(inputSamples, 1); inputTotal = SaturatingAdd(inputTotal, input); }
+            if (preparedOutputBodyBytes is { } output) { outputSamples = SaturatingAdd(outputSamples, 1); outputTotal = SaturatingAdd(outputTotal, output); }
+            if (durationMilliseconds is { } milliseconds) { durationSamples = SaturatingAdd(durationSamples, 1); durationTotal = SaturatingAdd(durationTotal, milliseconds); }
+        }
         // Listener callbacks run synchronously. Isolate each publication so an ordinary
         // consumer failure cannot affect inspection or prevent the other instrument.
         // Keep tag/outcome validation above these boundaries; never log consumer errors.
