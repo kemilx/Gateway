@@ -1,4 +1,4 @@
-# MVP-27 — Detección secundaria PAN opt-in local
+# MVP-28 — Contador de coincidencias secundarias PAN validadas (RF11 parcial)
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -61,7 +61,8 @@ errores posteriores prevalecen con `privacy_inspection_failed`; deadline/cancela
 descartan la salida parcial. Un DOM, recorrido integrado, lease y deadline existentes;
 sin segundo parse, regex de detección, listas de candidatos ni nuevos límites.
 
-No se añaden instrumentos ni tags. El contador de máscaras sigue midiendo
+MVP28 añade solo el contador de coincidencias **secundarias validadas**, descrito
+abajo, sin tags nuevos. El contador de máscaras sigue midiendo
 sustituciones validadas, **no hallazgos ni entrega**; Block cuenta cero máscaras.
 RF11 continúa parcial. El dashboard no expone el flag ni incluye el detector en
 `ruleCount`/`transformations`: solo describe reglas explícitas; su demo no simula
@@ -72,6 +73,53 @@ Despliegue/rollback: instalar primero el binario compatible y luego habilitar la
 clave, con reinicio; retirar la clave antes de volver a un binario anterior, que la
 rechaza como desconocida. No hay migración de datos ni despliegue realizado.
 Se conserva el constructor/deconstruct de cinco posiciones de `CompiledPanPolicy`.
+
+### Coincidencias secundarias PAN validadas (MVP-28, RF11 parcial)
+
+`gateway.privacy.inspection.secondary_pan_matches` es un `Counter<long>`, unidad
+`{match}`, en el Meter `Gateway.Privacy` versión `1.0.0`. Conserva exactamente los
+cuatro tags actuales: `gateway.route.id`, `gateway.policy.id`,
+`gateway.policy.version` y `gateway.privacy.outcome` (outcome **final**).
+
+Cuenta una coincidencia por ocurrencia original que el detector secundario existente
+acepta fuera de una regla explícita; arrays y propiedades duplicadas cuentan por
+separado. Excluye strings seleccionados por PAN/Email/Phone explícitos, incluso
+Luhn positivos; también null, otros tipos, nombres, Luhn negativos, opt-out,
+respuestas no elegibles y rechazos de capacidad. Mask y Block cuentan igual;
+Block sigue calculando cero máscaras. No cuenta todos los PAN, candidatos ni
+hallazgos universales, ni demuestra entrega al cliente.
+
+El acumulador `long` es local al recorrido integrado existente. Se confirma solo
+tras completar todo el recorrido, disponer el writer y superar el deadline check,
+en el mismo punto que las máscaras. Errores de tipo/JSON, deadline o cancelación
+anteriores descartan el parcial. Una vez confirmado se conserva ante fallos tardíos
+de checkpoint, headers o escritura, cancelación y timeout, con el outcome final.
+Solo publica positivos una vez en Complete terminal, nunca una muestra cero, ni
+durante una escritura pendiente. Cada instrumento aísla excepciones ordinarias
+independientemente. Un listener síncrono bloqueante puede demorar la finalización
+y retiene el lease: no se promete aislamiento temporal ni entrega exactamente una vez
+a consumidores externos. Sin muestras/valores guardados, tags nuevos, otro parse,
+recorrido, detector, opciones o dependencias.
+
+**El contador no es visible en el panel** ni se añade al modelo/summary/API del
+dashboard. No hay exporter, Observe, reload, BD, migración ni despliegue. Cambio
+aditivo de telemetría: consumidores por allowlist pueden incorporar el nombre;
+rollback de este contador elimina el instrumento sin cambiar HTTP ni configuración.
+Los defaults siguen intactos. RF11 sigue parcial; no acredita RNF03 ni producción.
+
+Las pruebas manuales monotónicas con StackTrace/checkpoint reutilizan la técnica
+histórica sensible al JIT: no prueban entrega real del timer. Sin benchmark/sizing
+ni browser nuevos (UI intacta).
+
+Validación sintética local MVP28: `dotnet build ProyectoSeguridad.slnx -c Release
+--no-restore` PASS, cero errores/advertencias. Focal Release con filtro
+`FullyQualifiedName~SecondaryPan|FullyQualifiedName~PrivacyTelemetryTests|FullyQualifiedName~MultiRuleTransformTests|FullyQualifiedName~DashboardTests`:
+**355/355 PASS**; `dotnet test ProyectoSeguridad.slnx -c Release --no-build
+--no-restore`: **830/830 PASS**, cero omitidas. Incluye HTTP real Mask/Block y
+barrera terminal `Duration.Samples >= N` **y** presupuesto `0/0`. Primer build
+falló por una asignación test-only a propiedad init; corregido, sin cambiar contrato.
+Revisión independiente estática **APPROVED**, sin hallazgos que requieran cambios;
+no implica aprobación de producto ni de producción.
 
 Validación sintética local MVP27: build Release de solución sin errores/advertencias,
 **81/81** pruebas focalizadas y **765/765** suite completa PASS, cero omitidas.
@@ -568,6 +616,7 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
 | `gateway.privacy.inspection.input_body_bytes` | `Histogram<long>` | `By` |
 | `gateway.privacy.inspection.output_body_bytes` | `Histogram<long>` | `By` |
 | `gateway.privacy.inspection.masks` | `Counter<long>` | `{mask}` |
+| `gateway.privacy.inspection.secondary_pan_matches` | `Counter<long>` | `{match}` |
 | `gateway.privacy.inspection.active` | `ObservableGauge<int>` | `{inspection}` |
 | `gateway.privacy.inspection.reserved_body_bytes` | `ObservableGauge<long>` | `By` |
 

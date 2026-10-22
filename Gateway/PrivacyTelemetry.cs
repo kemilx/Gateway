@@ -48,6 +48,7 @@ public sealed class PrivacyTelemetry : IDisposable
     private readonly Meter meter = new(MeterName, MeterVersion);
     private readonly Counter<long> outcomes;
     private readonly Counter<long> masks;
+    private readonly Counter<long> secondaryPanMatches;
     private readonly Histogram<double> duration;
     private readonly Histogram<long> inputBodyBytes;
     private readonly Histogram<long> outputBodyBytes;
@@ -59,6 +60,7 @@ public sealed class PrivacyTelemetry : IDisposable
         this.budget = budget;
         outcomes = meter.CreateCounter<long>("gateway.privacy.inspection.outcomes", "{inspection}");
         masks = meter.CreateCounter<long>("gateway.privacy.inspection.masks", "{mask}");
+        secondaryPanMatches = meter.CreateCounter<long>("gateway.privacy.inspection.secondary_pan_matches", "{match}");
         duration = meter.CreateHistogram<double>("gateway.privacy.inspection.duration", "ms");
         inputBodyBytes = meter.CreateHistogram<long>("gateway.privacy.inspection.input_body_bytes", "By");
         outputBodyBytes = meter.CreateHistogram<long>("gateway.privacy.inspection.output_body_bytes", "By");
@@ -90,7 +92,7 @@ public sealed class PrivacyTelemetry : IDisposable
 
     private void RecordOutcome(CompiledPanPolicy policy, PrivacyInspectionOutcome outcome,
         double? durationMilliseconds, long? capturedInputBodyBytes = null, long? preparedOutputBodyBytes = null,
-        long validatedMasks = 0)
+        long validatedMasks = 0, long validatedSecondaryPanMatches = 0)
     {
         var tags = new TagList
         {
@@ -152,6 +154,14 @@ public sealed class PrivacyTelemetry : IDisposable
             }
             catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
         }
+        if (validatedSecondaryPanMatches > 0)
+        {
+            try
+            {
+                secondaryPanMatches.Add(validatedSecondaryPanMatches, tags);
+            }
+            catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
+        }
     }
 
     private static bool IsOrdinaryListenerFailure(Exception exception) =>
@@ -181,6 +191,7 @@ public sealed class PrivacyTelemetry : IDisposable
         internal long? CapturedInputBodyBytes { get; set; }
         internal long? PreparedOutputBodyBytes { get; set; }
         internal long ValidatedMasks { get; set; }
+        internal long ValidatedSecondaryPanMatches { get; set; }
 
         internal InspectionMeasurement(PrivacyTelemetry telemetry, CompiledPanPolicy policy, IDisposable lease, TimeProvider clock, long startedAt)
         {
@@ -200,7 +211,7 @@ public sealed class PrivacyTelemetry : IDisposable
             try
             {
                 telemetry.RecordOutcome(policy, outcome, clock.GetElapsedTime(StartedAt).TotalMilliseconds,
-                    CapturedInputBodyBytes, PreparedOutputBodyBytes, ValidatedMasks);
+                    CapturedInputBodyBytes, PreparedOutputBodyBytes, ValidatedMasks, ValidatedSecondaryPanMatches);
             }
             finally
             {

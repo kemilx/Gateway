@@ -315,8 +315,9 @@ public sealed class SecondaryPanDetectionTests
         Assert.Equal(mode == "Mask" ? 1 : 0, telemetry.DashboardMetrics.ValidatedMasks);
         Assert.Equal(mode == "Block" ? 1 : 0, telemetry.DashboardMetrics.Outcomes.PolicyBlocked);
         Assert.NotEmpty(measurements);
-        Assert.Equal(mode == "Mask" ? 5 : 4, measurements.Count);
+        Assert.Equal(mode == "Mask" ? 6 : 5, measurements.Count);
         Assert.Equal(new[] { "gateway.privacy.inspection.duration", "gateway.privacy.inspection.input_body_bytes", "gateway.privacy.inspection.outcomes", "gateway.privacy.inspection.output_body_bytes" }
+            .Concat(["gateway.privacy.inspection.secondary_pan_matches"])
             .Concat(mode == "Mask" ? ["gateway.privacy.inspection.masks"] : Array.Empty<string>()).Order(), measurements.Select(m => m.Name).Order());
         foreach (var measurement in measurements)
             Assert.Equal(new[] { "gateway.policy.id", "gateway.policy.version", "gateway.privacy.outcome", "gateway.route.id" }, measurement.Tags.Select(t => t.Key).Order());

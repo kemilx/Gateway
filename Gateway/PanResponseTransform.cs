@@ -110,15 +110,18 @@ public sealed class PanResponseTransform
                 deadline.Check();
                 bool changed;
                 long calculatedMasks = 0;
+                long calculatedSecondaryPanMatches = 0;
                 using (var writer = new Utf8JsonWriter(transformed))
                     changed = policy.AdditionalRules.IsEmpty && !policy.SecondaryPanDetection
                         ? WriteSelected(document.RootElement, writer, policy, 0, deadline, ref calculatedMasks)
                         : WriteMultiple(document.RootElement, writer, MultiRuleSelection.Build(policy, deadline),
-                            policy.Mode, deadline, ref calculatedMasks, policy.SecondaryPanDetection);
+                            policy.Mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, policy.SecondaryPanDetection);
                 deadline.Check();
                 // Commit only a fully validated traversal, never partial substitutions.
                 // This measures calculation, not PAN detection or downstream delivery.
                 inspection.ValidatedMasks = calculatedMasks;
+                // Only secondary detector matches outside explicit rules; not all PAN or delivery.
+                inspection.ValidatedSecondaryPanMatches = calculatedSecondaryPanMatches;
                 // A match is only a candidate block: finish validation and checkpoints first.
                 if (changed && policy.Mode == "Block")
                 {
@@ -247,7 +250,8 @@ public sealed class PanResponseTransform
     }
 
     private static bool WriteMultiple(JsonElement value, Utf8JsonWriter writer, MultiRuleSelection? selection,
-        string mode, InspectionDeadline deadline, ref long calculatedMasks, bool secondaryPanDetection = false)
+        string mode, InspectionDeadline deadline, ref long calculatedMasks, ref long calculatedSecondaryPanMatches,
+        bool secondaryPanDetection = false)
     {
         deadline.Check();
         if (selection?.Transformation is { } transformation)
@@ -277,6 +281,7 @@ public sealed class PanResponseTransform
             deadline.Check();
             if (match)
             {
+                calculatedSecondaryPanMatches++;
                 if (mode == "Block") writer.WriteNullValue();
                 else { writer.WriteStringValue(Mask(text)); calculatedMasks++; }
                 deadline.Check();
@@ -294,7 +299,7 @@ public sealed class PanResponseTransform
                 writer.WritePropertyName(property.Name);
                 var child = selection?.Properties.GetValueOrDefault(property.Name);
                 if (child is not null || secondaryPanDetection)
-                    changed |= WriteMultiple(property.Value, writer, child, mode, deadline, ref calculatedMasks, secondaryPanDetection);
+                    changed |= WriteMultiple(property.Value, writer, child, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, secondaryPanDetection);
                 else CopyElement(property.Value, writer, deadline);
             }
             writer.WriteEndObject();
@@ -305,7 +310,7 @@ public sealed class PanResponseTransform
             foreach (var element in value.EnumerateArray())
             {
                 deadline.Check();
-                changed |= WriteMultiple(element, writer, selection?.ArrayItem, mode, deadline, ref calculatedMasks, secondaryPanDetection);
+                changed |= WriteMultiple(element, writer, selection?.ArrayItem, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, secondaryPanDetection);
             }
             writer.WriteEndArray();
         }
