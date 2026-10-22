@@ -111,10 +111,10 @@ public sealed class PanResponseTransform
                 bool changed;
                 long calculatedMasks = 0;
                 using (var writer = new Utf8JsonWriter(transformed))
-                    changed = policy.AdditionalRules.IsEmpty
+                    changed = policy.AdditionalRules.IsEmpty && !policy.SecondaryPanDetection
                         ? WriteSelected(document.RootElement, writer, policy, 0, deadline, ref calculatedMasks)
                         : WriteMultiple(document.RootElement, writer, MultiRuleSelection.Build(policy, deadline),
-                            policy.Mode, deadline, ref calculatedMasks);
+                            policy.Mode, deadline, ref calculatedMasks, policy.SecondaryPanDetection);
                 deadline.Check();
                 // Commit only a fully validated traversal, never partial substitutions.
                 // This measures calculation, not PAN detection or downstream delivery.
@@ -246,11 +246,11 @@ public sealed class PanResponseTransform
         return changed;
     }
 
-    private static bool WriteMultiple(JsonElement value, Utf8JsonWriter writer, MultiRuleSelection selection,
-        string mode, InspectionDeadline deadline, ref long calculatedMasks)
+    private static bool WriteMultiple(JsonElement value, Utf8JsonWriter writer, MultiRuleSelection? selection,
+        string mode, InspectionDeadline deadline, ref long calculatedMasks, bool secondaryPanDetection = false)
     {
         deadline.Check();
-        if (selection.Transformation is { } transformation)
+        if (selection?.Transformation is { } transformation)
         {
             if (value.ValueKind == JsonValueKind.Null) { CopyElement(value, writer, deadline); return false; }
             if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
@@ -270,6 +270,19 @@ public sealed class PanResponseTransform
             deadline.Check();
             return true;
         }
+        if (secondaryPanDetection && value.ValueKind == JsonValueKind.String)
+        {
+            var text = value.GetString()!;
+            var match = SecondaryPanDetector.IsMatch(text);
+            deadline.Check();
+            if (match)
+            {
+                if (mode == "Block") writer.WriteNullValue();
+                else { writer.WriteStringValue(Mask(text)); calculatedMasks++; }
+                deadline.Check();
+                return true;
+            }
+        }
         var changed = false;
         if (value.ValueKind == JsonValueKind.Object)
         {
@@ -279,19 +292,20 @@ public sealed class PanResponseTransform
             {
                 deadline.Check();
                 writer.WritePropertyName(property.Name);
-                if (selection.Properties.TryGetValue(property.Name, out var child))
-                    changed |= WriteMultiple(property.Value, writer, child, mode, deadline, ref calculatedMasks);
+                var child = selection?.Properties.GetValueOrDefault(property.Name);
+                if (child is not null || secondaryPanDetection)
+                    changed |= WriteMultiple(property.Value, writer, child, mode, deadline, ref calculatedMasks, secondaryPanDetection);
                 else CopyElement(property.Value, writer, deadline);
             }
             writer.WriteEndObject();
         }
-        else if (value.ValueKind == JsonValueKind.Array && selection.ArrayItem is { } arrayItem)
+        else if (value.ValueKind == JsonValueKind.Array && (selection?.ArrayItem is not null || secondaryPanDetection))
         {
             writer.WriteStartArray();
             foreach (var element in value.EnumerateArray())
             {
                 deadline.Check();
-                changed |= WriteMultiple(element, writer, arrayItem, mode, deadline, ref calculatedMasks);
+                changed |= WriteMultiple(element, writer, selection?.ArrayItem, mode, deadline, ref calculatedMasks, secondaryPanDetection);
             }
             writer.WriteEndArray();
         }

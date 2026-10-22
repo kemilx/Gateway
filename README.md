@@ -1,4 +1,4 @@
-# MVP-26 — Varias reglas por política y consulta local
+# MVP-27 — Detección secundaria PAN opt-in local
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,56 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Detección secundaria PAN (MVP-27, solo datos sintéticos)
+
+`PanPolicies:Policies:i:SecondaryPanDetection` es un booleano opcional: ausente
+equivale a `false` y conserva el recorrido legacy. `true` activa inspección de
+**todos los valores string originales** del JSON elegible, incluidos raíz, arrays,
+propiedades duplicadas y escapes JSON decodificados; nunca nombres de propiedades.
+El contrato es la configuración efectiva `IConfiguration`: acepta escalares
+`true`/`false` sin espacios, sin distinguir mayúsculas (el proveedor JSON normaliza
+booleanos a `True`/`False`). Rechaza null observable, vacío, números, otros textos
+y cualquier hijo, incluso junto a un escalar válido. No promete distinguir formas
+raw que un proveedor haya normalizado al mismo valor. Se congela al arrancar;
+no hay reload. No cambian appsettings ni los defaults distribuidos.
+
+Ejemplo opt-in con origen exclusivamente sintético:
+
+```powershell
+dotnet run --project Gateway -- --urls http://127.0.0.1:5100 --PanPolicies:Policies:0:SecondaryPanDetection true
+```
+
+El detector manual exige el valor completo: 13..19 dígitos ASCII, sin separador o
+un único espacio ASCII/guion entre cada par de dígitos, longitud máxima 37 y Luhn
+válido. No hace trim, no acepta Unicode, prefijos ni texto libre. No aplica reglas
+de emisor: todos ceros también coincide si cumple formato y Luhn. No descubre PAN
+en números JSON, headers, nombres de campos ni canales que antes no eran elegibles.
+
+Las reglas **explícitas tienen prioridad**, incluso Email/Phone: una transformación
+y como máximo una máscara por ocurrencia. Luhn negativo nunca evita una regla
+explícita. Para coincidencias secundarias, Mask reutiliza la máscara PAN existente
+(separadores y cuatro últimos dígitos visibles); Block responde 502 con
+`privacy_response_blocked` sin calcular máscaras. Se completa toda la validación:
+errores posteriores prevalecen con `privacy_inspection_failed`; deadline/cancelación
+descartan la salida parcial. Un DOM, recorrido integrado, lease y deadline existentes;
+sin segundo parse, regex de detección, listas de candidatos ni nuevos límites.
+
+No se añaden instrumentos ni tags. El contador de máscaras sigue midiendo
+sustituciones validadas, **no hallazgos ni entrega**; Block cuenta cero máscaras.
+RF11 continúa parcial. El dashboard no expone el flag ni incluye el detector en
+`ruleCount`/`transformations`: solo describe reglas explícitas; su demo no simula
+este detector. No se modifica la cobertura mínima configurada: el detector no
+sustituye selectores requeridos. No implica detección universal ni anonimización.
+
+Despliegue/rollback: instalar primero el binario compatible y luego habilitar la
+clave, con reinicio; retirar la clave antes de volver a un binario anterior, que la
+rechaza como desconocida. No hay migración de datos ni despliegue realizado.
+Se conserva el constructor/deconstruct de cinco posiciones de `CompiledPanPolicy`.
+
+Validación sintética local MVP27: build Release de solución sin errores/advertencias,
+**81/81** pruebas focalizadas y **765/765** suite completa PASS, cero omitidas.
+Sin benchmark/sizing, cambios frontend ni aprobación para producción.
 
 ### Transformaciones opt-in (MVP-25, solo datos sintéticos)
 
@@ -103,7 +153,8 @@ Implementación validada localmente con datos sintéticos; no implica aprobació
 siendo PAN al omitirse. `AdditionalRules` ausente equivale a lista vacía; permite
 0..15 reglas `{Selector, Transformation}` (1..16 reglas totales), con PAN por
 defecto al omitir la transformación adicional. Los tipos admitidos son los mismos
-strings exactos PAN/Email/Phone; no se deducen de PolicyId. No hay detectores,
+strings exactos PAN/Email/Phone; no se deducen de PolicyId. MVP26 no añade detectores
+(el detector opt-in MVP27 se describe arriba),
 Observe, reload, persistencia ni editor nuevo.
 
 Ejemplo sintético opt-in, conservando el selector PAN distribuido. Mantener TestApi

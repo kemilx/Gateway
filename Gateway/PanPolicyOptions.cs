@@ -42,6 +42,7 @@ public sealed class PanPolicyDefinition
     public string Transformation { get; set; } = "PAN";
     public string Selector { get; set; } = "";
     public int MaxBodyBytes { get; set; }
+    public bool SecondaryPanDetection { get; set; }
     public List<SensitiveRuleDefinition> AdditionalRules { get; set; } = [];
 }
 
@@ -137,6 +138,7 @@ public sealed record CompiledPanPolicy(string PolicyId, string Version, string R
 {
     public string Mode { get; init; } = "Mask";
     public string Transformation { get; init; } = "PAN";
+    public bool SecondaryPanDetection { get; init; }
     public ImmutableArray<CompiledSensitiveRule> AdditionalRules { get; init; } = [];
 }
 
@@ -154,7 +156,7 @@ public sealed class PanPolicyCatalog
         policies = options.Value.Policies.Select(p => new CompiledPanPolicy(p.PolicyId, p.Version, p.RouteId,
             PanPolicyValidator.CompileSelector(p.Selector), p.MaxBodyBytes)
             {
-                Mode = p.Mode, Transformation = p.Transformation,
+                Mode = p.Mode, Transformation = p.Transformation, SecondaryPanDetection = p.SecondaryPanDetection,
                 AdditionalRules = p.AdditionalRules.Select(rule => new CompiledSensitiveRule(
                     PanPolicyValidator.CompileSelector(rule.Selector), rule.Transformation)).ToImmutableArray()
             }).ToFrozenDictionary(p => p.RouteId, StringComparer.Ordinal);
@@ -164,6 +166,12 @@ public sealed class PanPolicyCatalog
     {
         foreach (var policy in configuration.GetSection("PanPolicies:Policies").GetChildren())
         {
+            var detector = policy.GetChildren().FirstOrDefault(child => child.Key.Equals("SecondaryPanDetection", StringComparison.OrdinalIgnoreCase));
+            // Validate the effective IConfiguration scalar, not the binder's permissive bool conversion.
+            if (detector is not null && ((!string.Equals(detector.Value, "true", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(detector.Value, "false", StringComparison.OrdinalIgnoreCase)) || detector.GetChildren().Any()))
+                throw new OptionsValidationException(Options.DefaultName, typeof(PanPolicyOptions),
+                    ["SecondaryPanDetection requires a true or false scalar (case-insensitive, without whitespace)."]);
             var section = policy.GetChildren().FirstOrDefault(child => child.Key.Equals("AdditionalRules", StringComparison.OrdinalIgnoreCase));
             if (section is null) continue;
             var items = section.GetChildren().ToArray();
