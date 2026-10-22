@@ -1,4 +1,4 @@
-# MVP-28 — Contador de coincidencias secundarias PAN validadas (RF11 parcial)
+# MVP-29 — Contador explícito validado previo a Observe (RF11 parcial)
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,52 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Coincidencias sensibles explícitas validadas (MVP-29, previo a Observe)
+
+`gateway.privacy.inspection.explicit_sensitive_matches` es un `Counter<long>` de
+unidad `{match}`, en `Gateway.Privacy` versión `1.0.0`, con los mismos cuatro tags:
+`gateway.route.id`, `gateway.policy.id`, `gateway.policy.version` y
+`gateway.privacy.outcome` final. Cuenta una vez cada ocurrencia string terminal
+seleccionada por declaración primary o AdditionalRules PAN/Email/Phone, incluidos
+vacíos, incompatibles, escapes decodificados, arrays y propiedades duplicadas.
+**No prueba que el valor sea PAN, Email o Phone.** Null, otros tipos, ausencia de
+coincidencias, respuestas no elegibles, capacidad denegada y precancelación no
+cuentan. El terminal explícito no-string/no-null sigue fallando cerrado.
+
+Mask y Block cuentan igual; Block sigue calculando cero máscaras. Las reglas
+explícitas tienen prioridad: su contador no solapa el secundario MVP28, cuyo
+contrato y conteos se conservan. No hay nueva clasificación ni segunda pasada.
+Un acumulador `long` local en cada recorrido se confirma junto con máscaras y
+secundarios solo tras recorrido completo, disposición del writer y deadline check.
+Los fallos anteriores descartan el parcial; los posteriores (checkpoint, headers,
+escritura, cancelación o deadline) conservan el conteo con el outcome final.
+
+Solo se publica un positivo una vez en Complete terminal; no es entrega al cliente
+ni garantía de recepción por observadores. Cada publicación aísla excepciones
+ordinarias independientemente. Callbacks síncronos bloqueantes conservan sus
+límites: pueden bloquear finalización y retener el lease, sin liberación anticipada.
+No se añaden strings de payload a telemetría, muestras retenidas ni tags.
+
+Cambio aditivo de telemetría: consumidores por allowlist pueden incorporar el
+nombre nuevo; rollback al binario anterior elimina solo este instrumento, sin
+migración de datos/configuración ni cambio HTTP. **No se ha implementado Observe**:
+los únicos modos siguen siendo Mask y Block. Sin cambios de defaults, host,
+detector, opciones, cobertura mínima, dependencias ni panel/modelo/API/assets/UI.
+El contador no aparece en el dashboard. RF11 continúa parcial; no acredita RNF03
+ni producción. Sin despliegue, benchmark/sizing ni browser nuevo (UI intacta).
+Los tests de StackTrace/checkpoint son sensibles al JIT/runtime y no prueban
+entrega real del timer.
+
+Validación sintética local MVP29: build Release de solución **PASS**, cero errores
+y advertencias; focal con `ExplicitSensitiveMatchTelemetryTests`, `SecondaryPan*`,
+`PrivacyTelemetryTests`, `InspectionDeadlineTests`, `MultiRuleTransformTests` y
+`DashboardTests`: **468/468 PASS**; suite completa **914/914 PASS**, cero omitidas.
+Incluye HTTP real Mask/Block con barrera `Duration.Samples >= N` **y** presupuesto
+`0/0`. Se conservan un build inicial fallido (asignación test-only a propiedad
+init) y un focal **459/460** (expectativa JSON de `+` frente a `\u002B`), corregidos
+solo en tests. Revisión independiente estática **APPROVED_WITH_WARNINGS**, sin
+defectos que requieran cambios; no implica aprobación del producto ni de producción.
 
 ### Detección secundaria PAN (MVP-27, solo datos sintéticos)
 
@@ -617,6 +663,7 @@ La implementación usa `System.Diagnostics.Metrics` con el `Meter`
 | `gateway.privacy.inspection.output_body_bytes` | `Histogram<long>` | `By` |
 | `gateway.privacy.inspection.masks` | `Counter<long>` | `{mask}` |
 | `gateway.privacy.inspection.secondary_pan_matches` | `Counter<long>` | `{match}` |
+| `gateway.privacy.inspection.explicit_sensitive_matches` | `Counter<long>` | `{match}` |
 | `gateway.privacy.inspection.active` | `ObservableGauge<int>` | `{inspection}` |
 | `gateway.privacy.inspection.reserved_body_bytes` | `ObservableGauge<long>` | `By` |
 

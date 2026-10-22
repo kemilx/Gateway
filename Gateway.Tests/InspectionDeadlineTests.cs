@@ -404,7 +404,16 @@ public sealed class InspectionDeadlineTests
         public void AssertMetrics(string outcome, double expectedMilliseconds = 1000, long? expectedInputBytes = null,
             long? expectedOutputBytes = null, long expectedMasks = 0)
         {
-            Assert.Equal(2 + (expectedInputBytes.HasValue ? 1 : 0) + (expectedOutputBytes.HasValue ? 1 : 0) + (expectedMasks > 0 ? 1 : 0), Metrics.Count);
+            Assert.Equal(2 + (expectedInputBytes.HasValue ? 1 : 0) + (expectedOutputBytes.HasValue ? 1 : 0) + (expectedMasks > 0 ? 2 : 0), Metrics.Count);
+            var explicitMatches = Metrics.Where(m => m.Instrument == "gateway.privacy.inspection.explicit_sensitive_matches");
+            if (expectedMasks == 0) Assert.Empty(explicitMatches);
+            else
+            {
+                var sample = Assert.Single(explicitMatches);
+                Assert.Equal(expectedMasks, sample.Value);
+                Assert.IsType<Counter<long>>(sample.Source);
+                Assert.Equal("{match}", sample.Source.Unit);
+            }
             Assert.Equal(1, Assert.Single(Metrics, m => m.Instrument == "gateway.privacy.inspection.outcomes" && m.Outcome == outcome).Value);
             Assert.Equal(expectedMilliseconds, Assert.Single(Metrics, m => m.Instrument == "gateway.privacy.inspection.duration" && m.Outcome == outcome).Value);
             AssertSize("gateway.privacy.inspection.input_body_bytes", expectedInputBytes);

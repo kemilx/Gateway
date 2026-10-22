@@ -111,17 +111,20 @@ public sealed class PanResponseTransform
                 bool changed;
                 long calculatedMasks = 0;
                 long calculatedSecondaryPanMatches = 0;
+                long calculatedExplicitSensitiveMatches = 0;
                 using (var writer = new Utf8JsonWriter(transformed))
                     changed = policy.AdditionalRules.IsEmpty && !policy.SecondaryPanDetection
-                        ? WriteSelected(document.RootElement, writer, policy, 0, deadline, ref calculatedMasks)
+                        ? WriteSelected(document.RootElement, writer, policy, 0, deadline, ref calculatedMasks, ref calculatedExplicitSensitiveMatches)
                         : WriteMultiple(document.RootElement, writer, MultiRuleSelection.Build(policy, deadline),
-                            policy.Mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, policy.SecondaryPanDetection);
+                            policy.Mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, ref calculatedExplicitSensitiveMatches, policy.SecondaryPanDetection);
                 deadline.Check();
                 // Commit only a fully validated traversal, never partial substitutions.
                 // This measures calculation, not PAN detection or downstream delivery.
                 inspection.ValidatedMasks = calculatedMasks;
                 // Only secondary detector matches outside explicit rules; not all PAN or delivery.
                 inspection.ValidatedSecondaryPanMatches = calculatedSecondaryPanMatches;
+                // Declaration-selected strings, not proof of PAN/Email/Phone or delivery.
+                inspection.ValidatedExplicitSensitiveMatches = calculatedExplicitSensitiveMatches;
                 // A match is only a candidate block: finish validation and checkpoints first.
                 if (changed && policy.Mode == "Block")
                 {
@@ -197,13 +200,14 @@ public sealed class PanResponseTransform
     }
 
     private static bool WriteSelected(JsonElement value, Utf8JsonWriter writer, CompiledPanPolicy policy, int segment,
-        InspectionDeadline deadline, ref long calculatedMasks)
+        InspectionDeadline deadline, ref long calculatedMasks, ref long calculatedExplicitSensitiveMatches)
     {
         deadline.Check();
         if (segment == policy.Segments.Length)
         {
             if (value.ValueKind == JsonValueKind.Null) { CopyElement(value, writer, deadline); return false; }
             if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
+            calculatedExplicitSensitiveMatches++;
             // Block selects every string, including empty/non-PAN; never mask it or stop traversal.
             if (policy.Mode == "Block") writer.WriteNullValue();
             else
@@ -229,7 +233,7 @@ public sealed class PanResponseTransform
             foreach (var element in value.EnumerateArray())
             {
                 deadline.Check();
-                arrayChanged |= WriteSelected(element, writer, policy, segment + 1, deadline, ref calculatedMasks);
+                arrayChanged |= WriteSelected(element, writer, policy, segment + 1, deadline, ref calculatedMasks, ref calculatedExplicitSensitiveMatches);
             }
             writer.WriteEndArray();
             return arrayChanged;
@@ -242,7 +246,7 @@ public sealed class PanResponseTransform
             deadline.Check();
             writer.WritePropertyName(property.Name);
             if (property.Name == policy.Segments[segment])
-                changed |= WriteSelected(property.Value, writer, policy, segment + 1, deadline, ref calculatedMasks);
+                changed |= WriteSelected(property.Value, writer, policy, segment + 1, deadline, ref calculatedMasks, ref calculatedExplicitSensitiveMatches);
             else CopyElement(property.Value, writer, deadline);
         }
         writer.WriteEndObject();
@@ -251,6 +255,7 @@ public sealed class PanResponseTransform
 
     private static bool WriteMultiple(JsonElement value, Utf8JsonWriter writer, MultiRuleSelection? selection,
         string mode, InspectionDeadline deadline, ref long calculatedMasks, ref long calculatedSecondaryPanMatches,
+        ref long calculatedExplicitSensitiveMatches,
         bool secondaryPanDetection = false)
     {
         deadline.Check();
@@ -258,6 +263,7 @@ public sealed class PanResponseTransform
         {
             if (value.ValueKind == JsonValueKind.Null) { CopyElement(value, writer, deadline); return false; }
             if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
+            calculatedExplicitSensitiveMatches++;
             if (mode == "Block") writer.WriteNullValue();
             else
             {
@@ -299,7 +305,7 @@ public sealed class PanResponseTransform
                 writer.WritePropertyName(property.Name);
                 var child = selection?.Properties.GetValueOrDefault(property.Name);
                 if (child is not null || secondaryPanDetection)
-                    changed |= WriteMultiple(property.Value, writer, child, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, secondaryPanDetection);
+                    changed |= WriteMultiple(property.Value, writer, child, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, ref calculatedExplicitSensitiveMatches, secondaryPanDetection);
                 else CopyElement(property.Value, writer, deadline);
             }
             writer.WriteEndObject();
@@ -310,7 +316,7 @@ public sealed class PanResponseTransform
             foreach (var element in value.EnumerateArray())
             {
                 deadline.Check();
-                changed |= WriteMultiple(element, writer, selection?.ArrayItem, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, secondaryPanDetection);
+                changed |= WriteMultiple(element, writer, selection?.ArrayItem, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, ref calculatedExplicitSensitiveMatches, secondaryPanDetection);
             }
             writer.WriteEndArray();
         }

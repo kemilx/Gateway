@@ -183,7 +183,7 @@ public sealed class MultiRuleTransformTests
         await fixture.Run();
         var error = scenario == "late-parse" ? InspectionError : BlockError;
         fixture.AssertError(error);
-        fixture.AssertCompleted(scenario == "late-parse" ? "blocked" : "policy_blocked", 0, Encoding.UTF8.GetByteCount(body), Encoding.UTF8.GetByteCount(error));
+        fixture.AssertCompleted(scenario == "late-parse" ? "blocked" : "policy_blocked", 0, Encoding.UTF8.GetByteCount(body), Encoding.UTF8.GetByteCount(error), scenario == "late-parse" ? 0 : 1);
     }
 
     [Theory]
@@ -534,8 +534,9 @@ public sealed class MultiRuleTransformTests
             Assert.False(Context.HttpContext.Response.Headers.ContainsKey("X-Upstream-Marker"));
             Assert.False(Context.HttpContext.Response.Headers.ContainsKey("Set-Cookie"));
         }
-        public void AssertCompleted(string outcome, long masks, long? input, long? output)
+        public void AssertCompleted(string outcome, long masks, long? input, long? output, long? explicitMatches = null)
         {
+            var matches = explicitMatches ?? masks;
             Assert.True(Context.SuppressResponseBody);
             Assert.Equal((0, 0L), Budget.Snapshot);
             Assert.Equal(masks, Telemetry.DashboardMetrics.ValidatedMasks);
@@ -544,7 +545,16 @@ public sealed class MultiRuleTransformTests
             Assert.Equal(output.HasValue ? 1 : 0, Telemetry.DashboardMetrics.Output.Samples);
             Assert.Equal(output ?? 0, Telemetry.DashboardMetrics.Output.TotalBytes);
             Assert.Equal(1, Telemetry.DashboardMetrics.Duration.Samples);
-            Assert.Equal(2 + (input.HasValue ? 1 : 0) + (output.HasValue ? 1 : 0) + (masks > 0 ? 1 : 0), Measurements.Count);
+            Assert.Equal(2 + (input.HasValue ? 1 : 0) + (output.HasValue ? 1 : 0) + (masks > 0 ? 1 : 0) + (matches > 0 ? 1 : 0), Measurements.Count);
+            var explicitMetrics = Measurements.Where(m => m.Name == "gateway.privacy.inspection.explicit_sensitive_matches");
+            if (matches == 0) Assert.Empty(explicitMetrics);
+            else
+            {
+                var metric = Assert.Single(explicitMetrics);
+                Assert.Equal(matches, metric.Value);
+                Assert.IsType<Counter<long>>(metric.Source);
+                Assert.Equal("{match}", metric.Source.Unit);
+            }
             Assert.Equal(1, Assert.Single(Measurements, m => m.Name == "gateway.privacy.inspection.outcomes").Value);
             Assert.Single(Measurements, m => m.Name == "gateway.privacy.inspection.duration");
             AssertSize("gateway.privacy.inspection.input_body_bytes", input);

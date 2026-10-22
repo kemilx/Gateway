@@ -65,7 +65,7 @@ public sealed class SecondaryPanMatchTelemetryTests
         var policy = Policy(mode) with { Transformation = type, AdditionalRules = [new(["a", "[*]"], type)] };
         using var f = new Fixture("{\"explicit\":\"4111111111111111\",\"a\":[\"4111111111111111\",\"4111111111111111\"],\"other\":\"4111111111111111\"}", policy);
         await f.Run();
-        metrics.AssertTerminal(policy, mode == "Mask" ? "inspected" : "policy_blocked", 1, mode == "Mask" ? 4 : 0);
+        metrics.AssertTerminal(policy, mode == "Mask" ? "inspected" : "policy_blocked", 1, mode == "Mask" ? 4 : 0, 3);
         f.Terminal();
     }
 
@@ -84,7 +84,7 @@ public sealed class SecondaryPanMatchTelemetryTests
         using var f = new Fixture(body, Policy(mode) with { SecondaryPanDetection = scenario != "optout" });
         await f.Run();
         metrics.AssertTerminal(f.Policy, scenario == "explicit-only" && mode == "Block" ? "policy_blocked" : "inspected", 0,
-            scenario == "explicit-only" && mode == "Mask" ? 1 : 0);
+            scenario == "explicit-only" && mode == "Mask" ? 1 : 0, scenario == "explicit-only" ? 1 : 0);
         if (scenario != "explicit-only") Assert.Equal(body, f.Text);
         f.Terminal();
     }
@@ -495,7 +495,7 @@ public sealed class SecondaryPanMatchTelemetryTests
             Samples.Enqueue(sample); OnSample?.Invoke(sample);
         }
         public Sample[] For(CompiledPanPolicy policy, string name) => Samples.Where(s => s.Instrument.Name == name && s.Tags.GetValueOrDefault("gateway.policy.id") == policy.PolicyId).ToArray();
-        public void AssertTerminal(CompiledPanPolicy policy, string outcome, long matches, long masks)
+        public void AssertTerminal(CompiledPanPolicy policy, string outcome, long matches, long masks, long explicitMatches = 0)
         {
             var terminal = Assert.Single(For(policy, Outcomes)); Assert.Equal(1L, Assert.IsType<long>(terminal.Value));
             Assert.Equal(outcome, terminal.Tags["gateway.privacy.outcome"]);
@@ -504,6 +504,17 @@ public sealed class SecondaryPanMatchTelemetryTests
             else { var sample = Assert.Single(For(policy, Matches)); AssertMatch(sample, policy, outcome, matches); Assert.Same(terminal.Instrument.Meter, sample.Instrument.Meter); }
             if (masks == 0) Assert.Empty(For(policy, Masks));
             else Assert.Equal(masks, Assert.IsType<long>(Assert.Single(For(policy, Masks)).Value));
+            var explicitSamples = For(policy, "gateway.privacy.inspection.explicit_sensitive_matches");
+            if (explicitMatches == 0) Assert.Empty(explicitSamples);
+            else
+            {
+                var sample = Assert.Single(explicitSamples);
+                Assert.Equal(explicitMatches, Assert.IsType<long>(sample.Value));
+                Assert.IsType<Counter<long>>(sample.Instrument);
+                Assert.Equal("{match}", sample.Instrument.Unit);
+                Assert.Same(terminal.Instrument.Meter, sample.Instrument.Meter);
+                Assert.Equal(terminal.Tags.OrderBy(t => t.Key), sample.Tags.OrderBy(t => t.Key));
+            }
         }
         public static void AssertMatch(Sample sample, CompiledPanPolicy policy, string outcome, long value)
         {
