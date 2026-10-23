@@ -1,4 +1,4 @@
-# MVP-32 — Eventos mínimos de exclusiones local/sintética (RF11 parcial)
+# MVP-33 — Eventos terminales de inspección local/sintética (RF11 parcial)
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,71 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Eventos terminales de inspección (MVP-33)
+
+Cada terminal ganadora intenta una sola publicación `Information`,
+`EventId(5, "PrivacyInspectionCompleted")`, por el ILogger existente del transform.
+Plantilla constante, excepción siempre null:
+
+```text
+Privacy inspection completed; schema {SchemaVersion} route {RouteId} service {ServiceId} policy {PolicyId} version {PolicyVersion} correlation {CorrelationId} outcome {Outcome} validated masks {ValidatedMasks} validated explicit sensitive matches {ValidatedExplicitSensitiveMatches} validated secondary PAN matches {ValidatedSecondaryPanMatches}.
+```
+
+Estado exacto: `SchemaVersion=1` (int), `RouteId`, `ServiceId`, `PolicyId`,
+`PolicyVersion`, `CorrelationId`, `Outcome`, `ValidatedMasks`,
+`ValidatedExplicitSensitiveMatches`, `ValidatedSecondaryPanMatches` (los tres long),
+más `{OriginalFormat}`. Las fuentes, gramática ASCII 1..64 y fallback `unknown`
+son los de MVP32: IDs de política inválidos omiten **solo event5**; servicio del
+ClusterId propietario del host, nunca de request/address. La API pública sin
+metadato de servicio conserva `unknown`. La correlación es GUID local nuevo `N`,
+32 hex minúsculas, no toma Activity/headers/TraceIdentifier ni se propaga en HTTP.
+No incluye RuleId, RuleEvaluation, selector, payload, URL, headers, excepción,
+método, status, media type, tamaños, duración ni contexto ambiental.
+
+`Outcome` conserva los ocho textos existentes: `inspected`, `blocked`,
+`capacity_exceeded`, `canceled`, `write_error`, `faulted`, `timed_out`,
+`policy_blocked`. Los conteos son los del recorrido completamente validado:
+antes del commit son cero; después se conservan aunque falle escritura, checkpoint,
+cancelación o timeout. Observe cuenta matches pero calcula cero máscaras; las
+reglas explícitas tienen prioridad sobre detección secundaria, sin doble conteo.
+Son agregados de cálculo/declaración, **no prueba de PII individual, de una regla
+individual ni de entrega al cliente**. No se normalizan como respuestas entregadas.
+
+El overload interno específico de telemetry transporta solo resumen inmutable
+outcome+conteos, no logger/servicio. Complete ganador publica métricas, libera lease
+y luego notifica fuera de locks. Capacity denegada publica primero su outcome,
+luego event5 con ceros, sin adquirir lease. Firmas públicas y overloads previos
+permanecen; llamadas directas a telemetry no emiten eventos. Exclusiones publican
+solo event4; upstream nulo, política ausente y cancelación previa a TryStart no
+publican event5. Eventos 1–4 y semántica de fallos del logger 1–3 se conservan.
+
+Solo se preparan correlación/argumentos si Information está habilitado. Fallos
+ordinarios de IsEnabled/Log y listeners se aíslan independientemente, sin reintento
+ni logging alternativo; errores críticos no se ocultan. No hay tareas, colas,
+historial ni estado compartido entre invocaciones nuevo. Providers síncronos pueden
+bloquear o descartar: event5 ya no retiene lease, pero puede demorar el retorno.
+Volumen máximo: un intento por terminal habilitada y válida (además de eventos
+preexistentes), proporcional al tráfico, sin sampling/rate limit nuevo. No se
+garantiza latencia ni entrega a todos los consumidores. La allowlist cubre solo
+este productor; enriquecimiento ambiental de providers externos queda fuera de
+la garantía, como en MVP32. No cambia configuración de logging/host.
+
+Cambio aditivo de logging sin migración ni orden obligatorio de despliegue;
+consumidores pueden aceptar EventId 5/schema 1 antes del binario. Rollback a MVP32
+retira solo event5; eventos1–4, métricas/tags, dashboard, HTTP, catálogo, defaults
+y dependencias permanecen. RF11 sigue **parcial**, local y sintético: no se ha
+desplegado ni aprobado el producto.
+
+Validación local MVP33: build Release de solución PASS (0 advertencias/errores),
+focal `PrivacyInspectionEventTests` **107/107 PASS**, suite completa **1212/1212
+PASS**, cero omitidas. Se conservan el build inicial fallido por inicializador
+del test (corregido) y el focal anterior, no se presentan como ejecución final.
+La evidencia MVP33 distingue ocho outcomes por seam interno de HTTP real YARP
+en Mask/Block/Observe (`inspected`/`policy_blocked`); no afirma ocho outcomes
+reproducidos por HTTP. Tests y artefactos se registran en scratch externo
+`MVP33-terminal-events`, sin reemplazar el histórico MVP32 de abajo. La revisión
+independiente y aceptación siguen pendientes del Coordinador.
 
 ### Eventos de exclusión (MVP-32)
 

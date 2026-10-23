@@ -75,6 +75,13 @@ public sealed class PrivacyTelemetry : IDisposable
     public InspectionMeasurement? TryStartInspection(CompiledPanPolicy policy) => TryStartInspection(policy, TimeProvider.System);
 
     internal InspectionMeasurement? TryStartInspection(CompiledPanPolicy policy, TimeProvider clock)
+        => TryStartInspection(policy, clock, null);
+
+    internal readonly record struct InspectionSummary(PrivacyInspectionOutcome Outcome, long ValidatedMasks,
+        long ValidatedExplicitSensitiveMatches, long ValidatedSecondaryPanMatches);
+
+    internal InspectionMeasurement? TryStartInspection(CompiledPanPolicy policy, TimeProvider clock,
+        Action<InspectionSummary>? completed)
     {
         ArgumentNullException.ThrowIfNull(policy);
         // Conservative start: includes scheduling/lock delay before acquisition, without
@@ -84,10 +91,17 @@ public sealed class PrivacyTelemetry : IDisposable
         if (lease is null)
         {
             RecordOutcome(policy, PrivacyInspectionOutcome.CapacityExceeded, durationMilliseconds: null);
+            Notify(completed, new(PrivacyInspectionOutcome.CapacityExceeded, 0, 0, 0));
             return null;
         }
 
-        return new InspectionMeasurement(this, policy, lease, clock, startedAt);
+        return new InspectionMeasurement(this, policy, lease, clock, startedAt, completed);
+    }
+
+    private static void Notify(Action<InspectionSummary>? callback, InspectionSummary summary)
+    {
+        try { callback?.Invoke(summary); }
+        catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
     }
 
     public void Dispose() => meter.Dispose();
@@ -195,7 +209,7 @@ public sealed class PrivacyTelemetry : IDisposable
     private static bool IsOrdinaryListenerFailure(Exception exception) =>
         exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException);
 
-    private static string GetOutcomeName(PrivacyInspectionOutcome outcome) => outcome switch
+    internal static string GetOutcomeName(PrivacyInspectionOutcome outcome) => outcome switch
     {
         PrivacyInspectionOutcome.Inspected => "inspected",
         PrivacyInspectionOutcome.Blocked => "blocked",
@@ -214,6 +228,7 @@ public sealed class PrivacyTelemetry : IDisposable
         private readonly CompiledPanPolicy policy;
         private readonly IDisposable lease;
         private readonly TimeProvider clock;
+        private readonly Action<InspectionSummary>? callback;
         internal long StartedAt { get; }
         private int completed;
         internal long? CapturedInputBodyBytes { get; set; }
@@ -223,7 +238,12 @@ public sealed class PrivacyTelemetry : IDisposable
         internal long ValidatedExplicitSensitiveMatches { get; set; }
 
         internal InspectionMeasurement(PrivacyTelemetry telemetry, CompiledPanPolicy policy, IDisposable lease, TimeProvider clock, long startedAt)
+            : this(telemetry, policy, lease, clock, startedAt, null) { }
+
+        internal InspectionMeasurement(PrivacyTelemetry telemetry, CompiledPanPolicy policy, IDisposable lease, TimeProvider clock, long startedAt,
+            Action<InspectionSummary>? callback)
         {
+            this.callback = callback;
             this.clock = clock;
             StartedAt = startedAt;
             this.telemetry = telemetry;
@@ -237,15 +257,18 @@ public sealed class PrivacyTelemetry : IDisposable
                 throw new ArgumentOutOfRangeException(nameof(outcome));
             if (Interlocked.Exchange(ref completed, 1) != 0) return;
 
+            var summary = new InspectionSummary(outcome, ValidatedMasks, ValidatedExplicitSensitiveMatches, ValidatedSecondaryPanMatches);
             try
             {
                 telemetry.RecordOutcome(policy, outcome, clock.GetElapsedTime(StartedAt).TotalMilliseconds,
-                    CapturedInputBodyBytes, PreparedOutputBodyBytes, ValidatedMasks, ValidatedSecondaryPanMatches, ValidatedExplicitSensitiveMatches);
+                    CapturedInputBodyBytes, PreparedOutputBodyBytes, summary.ValidatedMasks, summary.ValidatedSecondaryPanMatches, summary.ValidatedExplicitSensitiveMatches);
             }
             finally
             {
                 lease.Dispose();
             }
+            // The winning terminal publication has finished and owns no lease or lock.
+            Notify(callback, summary);
         }
 
         public void Dispose() => Complete(PrivacyInspectionOutcome.Faulted);

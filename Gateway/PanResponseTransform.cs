@@ -61,7 +61,8 @@ public sealed class PanResponseTransform
         // YARP has received headers but has not started the downstream response. Prevent its body copy.
         context.SuppressResponseBody = true;
         context.CancellationToken.ThrowIfCancellationRequested();
-        using var inspection = telemetry.TryStartInspection(policy, clock);
+        using var inspection = telemetry.TryStartInspection(policy, clock,
+            summary => RecordInspectionCompleted(policy, serviceId, summary));
         if (inspection is null)
         {
             context.CancellationToken.ThrowIfCancellationRequested();
@@ -211,6 +212,24 @@ public sealed class PanResponseTransform
                 : PrivacyInspectionOutcome.Faulted);
             throw;
         }
+    }
+
+    internal void RecordInspectionCompleted(CompiledPanPolicy policy, string? serviceId, PrivacyTelemetry.InspectionSummary summary)
+    {
+        try
+        {
+            if (!logger.IsEnabled(LogLevel.Information)) return;
+            if (!IsSafeIdentifier(policy.RouteId) || !IsSafeIdentifier(policy.PolicyId)
+                || !IsSafeIdentifier(policy.Version)) return;
+            var service = IsSafeIdentifier(serviceId) ? serviceId! : "unknown";
+            var correlation = Guid.NewGuid().ToString("N");
+            logger.LogInformation(new EventId(5, "PrivacyInspectionCompleted"),
+                "Privacy inspection completed; schema {SchemaVersion} route {RouteId} service {ServiceId} policy {PolicyId} version {PolicyVersion} correlation {CorrelationId} outcome {Outcome} validated masks {ValidatedMasks} validated explicit sensitive matches {ValidatedExplicitSensitiveMatches} validated secondary PAN matches {ValidatedSecondaryPanMatches}.",
+                1, policy.RouteId, service, policy.PolicyId, policy.Version, correlation,
+                PrivacyTelemetry.GetOutcomeName(summary.Outcome), summary.ValidatedMasks,
+                summary.ValidatedExplicitSensitiveMatches, summary.ValidatedSecondaryPanMatches);
+        }
+        catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException)) { }
     }
 
     private void RecordExclusion(CompiledPanPolicy policy, string? serviceId, string reason)
