@@ -92,6 +92,24 @@ public sealed class PrivacyTelemetry : IDisposable
 
     public void Dispose() => meter.Dispose();
 
+    internal void RecordExclusion(CompiledPanPolicy policy, string outcome)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        if (outcome is not ("excluded_head" or "excluded_bodyless" or "excluded_media_type"))
+            throw new ArgumentOutOfRangeException(nameof(outcome));
+        var tags = new TagList
+        {
+            { "gateway.route.id", policy.RouteId },
+            { "gateway.policy.id", policy.PolicyId },
+            { "gateway.policy.version", policy.Version },
+            { "gateway.privacy.outcome", outcome }
+        };
+        // Exclusions are not inspections: no lease, samples or dashboard totals.
+        // Synchronous consumers can still block; only ordinary failures are isolated.
+        try { outcomes.Add(1, tags); }
+        catch (Exception exception) when (IsOrdinaryListenerFailure(exception)) { }
+    }
+
     private void RecordOutcome(CompiledPanPolicy policy, PrivacyInspectionOutcome outcome,
         double? durationMilliseconds, long? capturedInputBodyBytes = null, long? preparedOutputBodyBytes = null,
         long validatedMasks = 0, long validatedSecondaryPanMatches = 0, long validatedExplicitSensitiveMatches = 0)

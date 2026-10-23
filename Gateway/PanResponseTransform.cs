@@ -43,11 +43,17 @@ public sealed class PanResponseTransform
         if (HttpMethods.IsHead(context.HttpContext.Request.Method) || (int)upstream.StatusCode is 204 or 304)
         {
             context.SuppressResponseBody = true;
+            telemetry.RecordExclusion(policy, HttpMethods.IsHead(context.HttpContext.Request.Method)
+                ? "excluded_head" : "excluded_bodyless");
             return;
         }
         var content = upstream.Content;
         if (!MediaTypeHeaderValue.TryParse(content.Headers.ContentType?.ToString(), out var media)
-            || !string.Equals(media.MediaType, "application/json", StringComparison.OrdinalIgnoreCase)) return;
+            || !string.Equals(media.MediaType, "application/json", StringComparison.OrdinalIgnoreCase))
+        {
+            telemetry.RecordExclusion(policy, "excluded_media_type");
+            return;
+        }
 
         // YARP has received headers but has not started the downstream response. Prevent its body copy.
         context.SuppressResponseBody = true;

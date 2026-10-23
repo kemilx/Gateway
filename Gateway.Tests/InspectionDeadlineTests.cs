@@ -298,7 +298,14 @@ public sealed class InspectionDeadlineTests
         await fixture.Run();
         fixture.Clock.Advance(TimeSpan.FromSeconds(2));
         Assert.Equal(0, fixture.Lifetime.Aborts);
-        Assert.Empty(fixture.Metrics);
+        if (reason == "headers") Assert.Empty(fixture.Metrics);
+        else
+        {
+            var outcome = Assert.Single(fixture.Metrics);
+            Assert.Equal("gateway.privacy.inspection.outcomes", outcome.Instrument);
+            Assert.Equal(1, outcome.Value);
+            Assert.Equal(reason == "head" ? "excluded_head" : "excluded_media_type", outcome.Outcome);
+        }
         Assert.Empty(fixture.Output.ToArray());
         Assert.Equal((0, 0L), fixture.Budget.Snapshot);
     }

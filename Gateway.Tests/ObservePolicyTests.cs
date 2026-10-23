@@ -222,7 +222,18 @@ public sealed class ObservePolicyTests
                 Assert.Equal(503, f.Context.HttpContext.Response.StatusCode); Assert.Equal("{\"code\":\"privacy_capacity_exceeded\"}", f.Text);
                 Assert.Equal("capacity_exceeded", Assert.Single(metrics.For(f.Policy, "outcomes")).Tags["gateway.privacy.outcome"]); Assert.Equal((1, 4096L), f.Budget.Snapshot);
             }
-            else { Assert.Empty(metrics.For(f.Policy, "outcomes")); Assert.Empty(f.Text); }
+            else
+            {
+                if (scenario is "head" or "204" or "304" or "media")
+                {
+                    var outcome = Assert.Single(metrics.For(f.Policy, "outcomes"));
+                    Assert.Equal(1L, Assert.IsType<long>(outcome.Value));
+                    Assert.Equal(scenario == "head" ? "excluded_head" : scenario == "media" ? "excluded_media_type" : "excluded_bodyless",
+                        outcome.Tags["gateway.privacy.outcome"]);
+                }
+                else Assert.Empty(metrics.For(f.Policy, "outcomes"));
+                Assert.Empty(f.Text);
+            }
         }
         Assert.Equal((0, 0L), f.Budget.Snapshot);
     }

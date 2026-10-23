@@ -19,6 +19,7 @@ using Xunit;
 
 namespace Gateway.Tests;
 
+[Collection("Secondary PAN telemetry isolation")]
 public sealed class PrivacyTelemetryTests
 {
     private const int ReservedBodyBytes = 1024;
@@ -695,33 +696,49 @@ public sealed class PrivacyTelemetryTests
     [Theory]
     [InlineData("Mask")]
     [InlineData("Block")]
-    public async Task Head_bodyless_and_non_json_responses_emit_no_outcomes(string mode)
+    [InlineData("Observe")]
+    public async Task Exclusions_publish_once_with_precedence_without_reading_or_using_budget(string mode)
     {
         using var metrics = new MetricCollector();
         var budget = Budget(maxConcurrent: 1, maxBytes: ReservedBodyBytes);
         using var telemetry = new PrivacyTelemetry(budget);
         var scenarios = new[]
         {
-            (Policy("TelemetryHead"), HttpMethods.Head, HttpStatusCode.OK, "application/json"),
-            (Policy("TelemetryNoContent"), HttpMethods.Get, HttpStatusCode.NoContent, "application/json"),
-            (Policy("TelemetryNotModified"), HttpMethods.Get, HttpStatusCode.NotModified, "application/json"),
-            (Policy("TelemetryNonJson"), HttpMethods.Get, HttpStatusCode.OK, "text/plain")
+            ("head", HttpMethods.Head, HttpStatusCode.OK, "application/json", "excluded_head"),
+            ("head204", HttpMethods.Head, HttpStatusCode.NoContent, "text/plain", "excluded_head"),
+            ("head304", HttpMethods.Head, HttpStatusCode.NotModified, "invalid", "excluded_head"),
+            ("204", HttpMethods.Get, HttpStatusCode.NoContent, "text/plain", "excluded_bodyless"),
+            ("304", HttpMethods.Get, HttpStatusCode.NotModified, (string?)null, "excluded_bodyless"),
+            ("plain", HttpMethods.Get, HttpStatusCode.OK, "text/plain", "excluded_media_type"),
+            ("missing", HttpMethods.Get, HttpStatusCode.OK, (string?)null, "excluded_media_type"),
+            ("invalid", HttpMethods.Get, HttpStatusCode.OK, "invalid", "excluded_media_type"),
+            ("suffix", HttpMethods.Get, HttpStatusCode.OK, "application/problem+json", "excluded_media_type"),
+            ("textjson", HttpMethods.Get, HttpStatusCode.OK, "text/json", "excluded_media_type")
         };
-
-        foreach (var (policy, method, status, mediaType) in scenarios)
+        using var held = budget.TryAcquire(1);
+        Assert.NotNull(held);
+        var before = telemetry.DashboardMetrics;
+        foreach (var (id, method, status, mediaType, expected) in scenarios)
         {
+            var policy = Policy("Exclusion" + id) with { Mode = mode };
+            using var content = new ForbiddenReadContent();
+            if (mediaType is not null) content.Headers.TryAddWithoutValidation("Content-Type", mediaType);
             using var downstream = new MemoryStream();
-            using var invocation = Invocation(telemetry, policy with { Mode = mode }, Content(JsonBody, mediaType), downstream,
+            using var invocation = Invocation(telemetry, policy, content, downstream,
                 method: method, statusCode: status);
             await invocation.ApplyAsync();
-            Assert.Empty(metrics.ForPolicy(Outcomes, policy.PolicyId));
-            Assert.Empty(metrics.ForPolicy(Duration, policy.PolicyId));
-            Assert.Empty(metrics.ForPolicy(InputSize, policy.PolicyId));
-            Assert.Empty(metrics.ForPolicy(OutputSize, policy.PolicyId));
-            AssertMasks(metrics, policy, "inspected", 0);
+            var sample = AssertOutcome(metrics, policy, expected);
+            Assert.IsType<Counter<long>>(sample.Instrument);
+            Assert.Single(metrics.ForPolicyAll(policy.PolicyId));
+            Assert.Equal(method == HttpMethods.Head || (int)status is 204 or 304, invocation.Context.SuppressResponseBody);
+            Assert.Equal((int)status, invocation.Context.HttpContext.Response.StatusCode);
+            Assert.Equal("no-store", invocation.Context.HttpContext.Response.Headers.CacheControl);
+            Assert.Empty(downstream.ToArray());
+            Assert.False(content.ReadAttempted);
+            Assert.Equal((1, 1L), budget.Snapshot);
+            Assert.Equal(before, telemetry.DashboardMetrics);
         }
-
-        Assert.Equal((0, 0L), budget.Snapshot);
+        Assert.Equal(8, Enum.GetValues<PrivacyInspectionOutcome>().Length);
     }
 
     [Fact]
@@ -762,6 +779,129 @@ public sealed class PrivacyTelemetryTests
             await gateway.StopAsync();
             await api.StopAsync();
         }
+    }
+
+    [Theory]
+    [InlineData("Mask")]
+    [InlineData("Block")]
+    [InlineData("Observe")]
+    public async Task Eligible_json_media_variants_keep_existing_inspection(string mode)
+    {
+        foreach (var media in new[] { "application/json", "APPLICATION/JSON", "application/json; charset=utf-8", "application/json; charset=\"UTF-8\"", "application/json; profile=synthetic" })
+        {
+            using var metrics = new MetricCollector();
+            var policy = Policy("EligibleJson") with { Mode = mode };
+            using var telemetry = new PrivacyTelemetry(Budget(1, ReservedBodyBytes));
+            using var content = new ByteArrayContent(Encoding.UTF8.GetBytes(JsonBody));
+            content.Headers.TryAddWithoutValidation("Content-Type", media);
+            using var downstream = new MemoryStream();
+            using var invocation = Invocation(telemetry, policy, content, downstream);
+            await invocation.ApplyAsync();
+            AssertOutcomeAndDuration(metrics, policy, mode == "Block" ? "policy_blocked" : "inspected");
+            Assert.Equal(mode == "Block" ? "{\"code\":\"privacy_response_blocked\"}" : mode == "Observe" ? JsonBody
+                : "{\"payment\":{\"cardNumber\":\"************1111\"}}", Encoding.UTF8.GetString(downstream.ToArray()));
+        }
+    }
+
+    [Theory]
+    [InlineData("head")]
+    [InlineData("bodyless")]
+    [InlineData("media")]
+    public async Task Exclusion_listener_failure_is_isolated_and_no_upstream_emits_nothing(string scenario)
+    {
+        var policy = Policy("ExcludedThrower");
+        foreach (var failure in new Exception[] { new InvalidOperationException(), new OperationCanceledException() })
+        {
+            using var metrics = new MetricCollector(Outcomes, policy.PolicyId, failure);
+            var budget = Budget(1, ReservedBodyBytes);
+            using var telemetry = new PrivacyTelemetry(budget);
+            using var downstream = new MemoryStream();
+            using var invocation = Invocation(telemetry, policy, new ForbiddenReadContent(), downstream,
+                method: scenario == "head" ? "HEAD" : "GET", statusCode: scenario == "bodyless" ? HttpStatusCode.NoContent : HttpStatusCode.OK);
+            var before = telemetry.DashboardMetrics;
+            await invocation.ApplyAsync();
+            AssertOutcome(metrics, policy, scenario == "head" ? "excluded_head" : scenario == "bodyless" ? "excluded_bodyless" : "excluded_media_type");
+            Assert.Single(metrics.ForPolicyAll(policy.PolicyId));
+            Assert.Equal(before, telemetry.DashboardMetrics);
+            Assert.Empty(downstream.ToArray());
+            metrics.Clear();
+            var noUpstream = new ResponseTransformContext
+            {
+                HttpContext = invocation.Context.HttpContext,
+                ProxyResponse = null
+            };
+            await new PanResponseTransform(NullLogger<PanResponseTransform>.Instance, telemetry).ApplyAsync(noUpstream, policy);
+            Assert.Empty(metrics.ForPolicyAll(policy.PolicyId));
+        }
+    }
+
+    [Theory]
+    [InlineData("Mask")]
+    [InlineData("Block")]
+    [InlineData("Observe")]
+    public async Task Real_http_exclusions_preserve_response_and_leave_dashboard_unchanged(string mode)
+    {
+        var values = PolicyConfiguration.Defaults();
+        const string id = "RealExclusions";
+        values["PanPolicies:Policies:0:PolicyId"] = id;
+        values["PanPolicies:Policies:0:Mode"] = mode;
+        using var metrics = new MetricCollector(Outcomes, id);
+        var builder = WebApplication.CreateBuilder([]);
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var api = builder.Build();
+        api.Map("/{**rest}", async context =>
+        {
+            context.Response.StatusCode = context.Request.Path.Value switch { "/204" => 204, "/304" => 304, _ => 200 };
+            context.Response.ContentType = "text/plain";
+            context.Response.Headers["X-Synthetic"] = "preserved";
+            if (!HttpMethods.IsHead(context.Request.Method) && context.Response.StatusCode == 200)
+                await context.Response.WriteAsync("synthetic uninspected body");
+        });
+        await api.StartAsync();
+        await using var gateway = GatewayHost.Build([], Address(api) + "/", b =>
+        {
+            b.Configuration.Sources.Clear();
+            b.Configuration.AddInMemoryCollection(values);
+            b.WebHost.UseUrls("http://127.0.0.1:0");
+        });
+        try
+        {
+            await gateway.StartAsync();
+            var telemetry = gateway.Services.GetRequiredService<PrivacyTelemetry>();
+            var before = telemetry.DashboardMetrics;
+            using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { BaseAddress = new Uri(Address(gateway)), Timeout = TimeSpan.FromSeconds(15) };
+            foreach (var (method, path, status, outcome) in new[]
+            {
+                (HttpMethod.Head, "/204", 204, "excluded_head"),
+                (HttpMethod.Get, "/204", 204, "excluded_bodyless"),
+                (HttpMethod.Get, "/304", 304, "excluded_bodyless"),
+                (HttpMethod.Get, "/plain", 200, "excluded_media_type")
+            })
+            {
+                metrics.Clear();
+                using var request = new HttpRequestMessage(method, "/protected" + path);
+                using var response = await client.SendAsync(request);
+                Assert.Equal(status, (int)response.StatusCode);
+                Assert.Equal("preserved", Assert.Single(response.Headers.GetValues("X-Synthetic")));
+                Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+                Assert.Equal(status == 200 ? "synthetic uninspected body" : "", await response.Content.ReadAsStringAsync());
+                // Publication is synchronous and precedes the exclusion return/body forwarding.
+                // Completed HTTP response + exactly one captured callback is the exclusion barrier;
+                // Duration.Samples cannot advance on this path. The thrower captures before throwing.
+                var sample = Assert.Single(metrics.ForPolicyAll(id));
+                Assert.Equal(outcome, sample.Tags["gateway.privacy.outcome"]);
+                Assert.Equal(4, sample.Tags.Count);
+                Assert.Equal(1, sample.Value);
+                Assert.Equal(Outcomes, sample.InstrumentName);
+                Assert.Equal(before, telemetry.DashboardMetrics);
+                Assert.Equal((0, 0L), gateway.Services.GetRequiredService<InspectionBudget>().Snapshot);
+            }
+            metrics.Clear();
+            Assert.Equal("synthetic uninspected body", await client.GetStringAsync("/passthrough/plain"));
+            Assert.Empty(metrics.ForPolicyAll(id));
+            Assert.Equal(before, telemetry.DashboardMetrics);
+        }
+        finally { await gateway.StopAsync(); await api.StopAsync(); }
     }
 
     [Theory]
@@ -1273,6 +1413,9 @@ public sealed class PrivacyTelemetryTests
             .Where(item => item.InstrumentName == instrumentName)
             .ToArray();
 
+        public CapturedMeasurement[] ForPolicyAll(string policyId) => measurements
+            .Where(item => item.Tags.GetValueOrDefault("gateway.policy.id") == policyId).ToArray();
+
         public void RecordObservableInstruments() => listener.RecordObservableInstruments();
 
         public void Clear()
@@ -1299,6 +1442,22 @@ public sealed class PrivacyTelemetryTests
 
     private sealed record CapturedMeasurement(string InstrumentName, string? Unit, double Value,
         IReadOnlyDictionary<string, string?> Tags, Meter Meter, Instrument Instrument);
+
+    private sealed class ForbiddenReadContent : HttpContent
+    {
+        public bool ReadAttempted { get; private set; }
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            ReadAttempted = true;
+            throw new InvalidOperationException("Excluded content must not be read.");
+        }
+        protected override Task<Stream> CreateContentReadStreamAsync()
+        {
+            ReadAttempted = true;
+            throw new InvalidOperationException("Excluded content must not be opened.");
+        }
+    }
 
     private sealed class ControlledWriteStream(bool cooperative = true) : Stream
     {

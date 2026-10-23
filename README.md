@@ -1,4 +1,4 @@
-# MVP-30 — Observe opt-in local/sintético (RF11 parcial)
+# MVP-31 — Telemetría mínima de exclusiones local/sintética (RF11 parcial)
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,53 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Exclusiones observables (MVP-31)
+
+Con upstream y política, cada invocación excluida publica **+1** en el contador
+existente `gateway.privacy.inspection.outcomes` (`{inspection}`, meter
+`Gateway.Privacy` versión `1.0.0`). Conserva exactamente los cuatro tags
+`gateway.route.id`, `gateway.policy.id`, `gateway.policy.version` y
+`gateway.privacy.outcome`. Prioridad: `excluded_head` para HEAD, luego
+`excluded_bodyless` para 204/304 restantes, luego `excluded_media_type` para
+Content-Type ausente, inválido o distinto de `application/json`. No se admiten
+nuevos tipos (por ejemplo `application/problem+json` sigue excluido); JSON
+admitido, incluidos sus parámetros y comparación case-insensitive, queda intacto.
+
+Se publica antes del retorno, sin lease, lectura del body, duración, tamaños,
+hallazgos ni máscaras. Sin upstream o sin política no hay muestra. Funciona igual
+en Mask, Block y Observe, sin cambiar defaults, elegibilidad, HTTP, host ni UI.
+Las exclusiones **no son éxito ni fail-open** ni evidencia de protección: cuerpos
+non-JSON pueden pasar sin inspección. No se agregan al panel: el enum público y
+sus ocho totales permanecen intactos. No hay instrumentos, API ni dependencias
+nuevas. Consumidores del contador deben tolerar los tres nuevos textos de outcome.
+
+Las excepciones ordinarias de listeners se aíslan como antes (incluida su
+OperationCanceledException); errores críticos no se ocultan. Los callbacks son
+síncronos: un listener bloqueante puede demorar el retorno, sin garantía de
+latencia, entrega ni aislamiento entre listeners. No se garantiza entrega de la
+muestra a todos los consumidores si uno falla.
+
+Sin migraciones ni orden de despliegue obligatorio; rollback del binario elimina
+estos tres outcomes sin cambiar configuración. No se ha desplegado. RF11 sigue
+**parcial**: solo validación local sintética; no implica aceptación productiva.
+Las secciones siguientes conservan el contrato y la evidencia histórica de cada
+incremento; las afirmaciones históricas de «sin outcomes nuevos» no describen MVP31.
+
+Validación local MVP31: build Release PASS (0 advertencias/errores), focal
+final de cinco clases **384/384 PASS** y suite completa **1011/1011 PASS**, cero
+omitidas. El focal incluye PrivacyTelemetryTests, InspectionDeadlineTests,
+ObservePolicyTests, SecondaryPanMatchTelemetryTests y ExplicitSensitiveMatchTelemetryTests.
+Se conserva la ejecución inicial **997/1011 PASS, 14 FAIL**: analizados uno por
+uno, eran expectativas históricas de cero outcomes en exclusiones de las cuatro
+últimas clases. Tras autorización para esos archivos se actualizaron solo esas
+expectativas a una muestra +1 con el outcome exacto, preservando las aserciones
+de ausencia de otros instrumentos, hallazgos, lectura, presupuesto y HTTP.
+Se conserva también el build inicial fallido por asignación test-only a propiedad
+init, corregido antes del build final. Logs, TRX, snapshots y manifiestos SHA-256
+finales están en scratch local externo `MVP31-exclusions/v2`, sin sobrescribir la
+evidencia inicial. No se declara revisión independiente realizada ni aceptación
+de producto o producción.
 
 ### Observe (MVP-30): exposición deliberada, solo datos sintéticos locales
 
