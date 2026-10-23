@@ -1,4 +1,4 @@
-# MVP-31 — Telemetría mínima de exclusiones local/sintética (RF11 parcial)
+# MVP-32 — Eventos mínimos de exclusiones local/sintética (RF11 parcial)
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,78 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Eventos de exclusión (MVP-32)
+
+Con upstream y política de catálogo, cada exclusión intenta publicar una sola vez
+por el ILogger existente: `Information`, `EventId(4, "PrivacyExcluded")`. Plantilla
+constante (sin excepción adjunta):
+
+```text
+Privacy excluded; schema {SchemaVersion} route {RouteId} service {ServiceId} policy {PolicyId} version {PolicyVersion} reason {Reason} rule evaluation {RuleEvaluation} correlation {CorrelationId}.
+```
+
+Estado exacto: `SchemaVersion=1` (entero), `RouteId`, `PolicyId` y `PolicyVersion`
+de catálogo, `ServiceId` del ClusterId propietario de la ruta del host
+(`synthetic-api`, nunca destination/address/request), `Reason` con la prioridad
+MVP31 indicada abajo, `RuleEvaluation=not_evaluated` y `CorrelationId` GUID nuevo
+local de 32 caracteres hexadecimales minúsculos (`N`). Más `{OriginalFormat}`
+normal del framework. No existe RuleId porque no se evalúan reglas. No se incluyen
+valor, URL, headers, método, status, media type, excepción, contexto ni selector.
+La API pública `ApplyAsync(context, policy)` y los constructores se conservan:
+sin contexto de servicio usa el literal acotado `unknown`, sin inventar atribución.
+El overload interno recibe solo metadato del host y valida identificador ASCII
+de 1..64 caracteres (alfanumérico inicial, luego alfanumérico/`.`/`_`/`-`);
+metadato inválido o ausente también usa `unknown`. El host usa identificadores del
+catálogo validado, no texto de request ni payload. Como `CompiledPanPolicy` es
+públicamente construible, el nuevo evento valida también **los tres** identificadores
+RouteId/PolicyId/Version con esa misma gramática; si cualquiera es inválido (incluidos
+null, vacío, control/newline o más de 64 caracteres), **omite el evento**, sin
+sanitizar/truncar ni modificar la métrica o el HTTP preexistentes. La validación
+local asegura formato acotado, no pertenencia al catálogo para llamadas públicas.
+
+La correlación identifica **esta invocación**, no end-to-end: no toma correlación
+entrante, Activity, TraceIdentifier ni baggage; no se propaga ni devuelve en HTTP.
+Solo se prepara estado/correlación si Information está habilitado. Se aíslan
+excepciones ordinarias tanto de IsEnabled como de Log, incluida cancelación del
+logger. Contador y evento son publicaciones independientes ante esos fallos; sin
+reintento ni log alternativo. Errores críticos no se ocultan. Sin upstream, sin
+política o para JSON elegible no se emite este evento nuevo.
+
+La garantía de privacidad describe el estado allowlist y texto que emite este
+productor, siempre con excepción null. No se añaden scopes ni enriquecedores.
+Un provider confiable puede añadir contexto ambiental por su propia configuración:
+ese enriquecimiento queda **fuera de esta garantía**. El host vigente registra
+ConsoleLoggerProvider con formatter simple y scopes deshabilitados por defecto;
+la configuración ambiental de LoggerFactory conserva sus defaults de Activity.
+Overrides externos pueden cambiar esa configuración: no se promete controlar
+otros providers, scopes del llamador ni sinks externos.
+
+No hay lease, lectura de cuerpo, tareas, colas ni historial nuevos. Los proveedores
+de logging y listeners son síncronos: pueden bloquear o descartar; no se garantiza
+latencia, entrega ni recepción por todos los consumidores. El volumen máximo de
+intentos de evento es uno por exclusión con Information habilitado: puede crecer
+con el tráfico; la correlación no es tag métrico ni se almacena en el dashboard.
+No hay muestreo ni rate limit nuevo. No prueba protección de cuerpos excluidos.
+
+Cambio aditivo de contrato de logging, sin migración ni orden obligatorio de
+despliegue. Consumidores pueden aceptar EventId 4/schema 1 antes de actualizar;
+rollback del binario a MVP31 elimina solo este evento y conserva sus contadores.
+Sin cambios de configuración, defaults, HTTP, elegibilidad, enum, métricas/tags,
+panel o dependencias. RF11 sigue **parcial**, solo uso local sintético; sin
+despliegue ni aprobación de producto/producción.
+
+Validación local MVP32: build Release de solución PASS (0 advertencias/errores),
+focal `PrivacyExclusionEventTests` **94/94 PASS**, suite completa **1105/1105 PASS**,
+cero omitidas. Incluye HTTP real cliente → YARP → upstream sintético, fallos de
+IsEnabled/Log (también cancelación), independencia del contador, esquema exacto,
+precedencia, ausencia de payload y correlaciones locales distintas. Se conserva
+el primer intento completo interrumpido por timeout del runner a 120 s, sin TRX
+final; la ejecución final terminó correctamente con mayor límite del runner.
+Logs, TRX, snapshots, manifiestos SHA-256, cuatro DLL y matriz Requirement/Evidence
+en scratch externo `MVP32-exclusion-events/v2` para la revisión de la frontera
+pública; la evidencia anterior se conserva en el directorio padre. La revisión propia no sustituye
+revisión independiente ni aceptación de producto.
 
 ### Exclusiones observables (MVP-31)
 
@@ -57,7 +129,9 @@ Sin migraciones ni orden de despliegue obligatorio; rollback del binario elimina
 estos tres outcomes sin cambiar configuración. No se ha desplegado. RF11 sigue
 **parcial**: solo validación local sintética; no implica aceptación productiva.
 Las secciones siguientes conservan el contrato y la evidencia histórica de cada
-incremento; las afirmaciones históricas de «sin outcomes nuevos» no describen MVP31.
+incremento; las afirmaciones históricas de «sin outcomes nuevos» o exclusiones
+«sin outcomes» describen su momento, no MVP31/MVP32. Desde MVP31 las exclusiones
+sí publican los tres outcomes del contador; desde MVP32 intentan además el evento.
 
 Validación local MVP31: build Release PASS (0 advertencias/errores), focal
 final de cinco clases **384/384 PASS** y suite completa **1011/1011 PASS**, cero

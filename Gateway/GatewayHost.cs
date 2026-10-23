@@ -81,7 +81,7 @@ public static class GatewayHost
                     return ValueTask.CompletedTask;
                 });
                 context.AddResponseTransform(transform =>
-                    context.Services.GetRequiredService<PanResponseTransform>().ApplyAsync(transform, policy));
+                    context.Services.GetRequiredService<PanResponseTransform>().ApplyAsync(transform, policy, context.Route.ClusterId));
             });
         builder.Services.AddSingleton<Yarp.ReverseProxy.Forwarder.IForwarderHttpClientFactory, UpstreamHeadersHttpClientFactory>();
         LoopbackListenerGuard.Register(builder.Services);

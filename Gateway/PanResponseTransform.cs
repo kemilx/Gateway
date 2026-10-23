@@ -34,7 +34,10 @@ public sealed class PanResponseTransform
         this.diagnosticCheckpoint = diagnosticCheckpoint;
     }
 
-    public async ValueTask ApplyAsync(ResponseTransformContext context, CompiledPanPolicy policy)
+    public ValueTask ApplyAsync(ResponseTransformContext context, CompiledPanPolicy policy) =>
+        ApplyAsync(context, policy, "unknown");
+
+    internal async ValueTask ApplyAsync(ResponseTransformContext context, CompiledPanPolicy policy, string? serviceId)
     {
         var response = context.HttpContext.Response;
         response.Headers.CacheControl = "no-store";
@@ -43,7 +46,7 @@ public sealed class PanResponseTransform
         if (HttpMethods.IsHead(context.HttpContext.Request.Method) || (int)upstream.StatusCode is 204 or 304)
         {
             context.SuppressResponseBody = true;
-            telemetry.RecordExclusion(policy, HttpMethods.IsHead(context.HttpContext.Request.Method)
+            RecordExclusion(policy, serviceId, HttpMethods.IsHead(context.HttpContext.Request.Method)
                 ? "excluded_head" : "excluded_bodyless");
             return;
         }
@@ -51,7 +54,7 @@ public sealed class PanResponseTransform
         if (!MediaTypeHeaderValue.TryParse(content.Headers.ContentType?.ToString(), out var media)
             || !string.Equals(media.MediaType, "application/json", StringComparison.OrdinalIgnoreCase))
         {
-            telemetry.RecordExclusion(policy, "excluded_media_type");
+            RecordExclusion(policy, serviceId, "excluded_media_type");
             return;
         }
 
@@ -209,6 +212,32 @@ public sealed class PanResponseTransform
             throw;
         }
     }
+
+    private void RecordExclusion(CompiledPanPolicy policy, string? serviceId, string reason)
+    {
+        // Independent synchronous publications; never retry or log consumer failures.
+        telemetry.RecordExclusion(policy, reason);
+        try
+        {
+            // Even IsEnabled is external code. Prepare no event data while disabled.
+            if (!logger.IsEnabled(LogLevel.Information)) return;
+            // CompiledPanPolicy is publicly constructible, not proof of catalog validation.
+            // Fail closed for this new event only; leave pre-existing metric/HTTP behavior intact.
+            if (!IsSafeIdentifier(policy.RouteId) || !IsSafeIdentifier(policy.PolicyId)
+                || !IsSafeIdentifier(policy.Version)) return;
+            var service = IsSafeIdentifier(serviceId) ? serviceId! : "unknown";
+            var correlation = Guid.NewGuid().ToString("N");
+            logger.LogInformation(new EventId(4, "PrivacyExcluded"),
+                "Privacy excluded; schema {SchemaVersion} route {RouteId} service {ServiceId} policy {PolicyId} version {PolicyVersion} reason {Reason} rule evaluation {RuleEvaluation} correlation {CorrelationId}.",
+                1, policy.RouteId, service, policy.PolicyId, policy.Version, reason, "not_evaluated", correlation);
+        }
+        catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException)) { }
+    }
+
+    // Same grammar as PanPolicyValidator.SafeIdentifier: [A-Za-z0-9][A-Za-z0-9._-]{0,63}.
+    private static bool IsSafeIdentifier(string? value) => value is { Length: > 0 and <= 64 }
+        && char.IsAsciiLetterOrDigit(value[0])
+        && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-');
 
     private static bool WriteSelected(JsonElement value, Utf8JsonWriter writer, CompiledPanPolicy policy, int segment,
         InspectionDeadline deadline, ref long calculatedMasks, ref long calculatedExplicitSensitiveMatches)
