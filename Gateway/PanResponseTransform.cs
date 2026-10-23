@@ -126,7 +126,12 @@ public sealed class PanResponseTransform
                 // Declaration-selected strings, not proof of PAN/Email/Phone or delivery.
                 inspection.ValidatedExplicitSensitiveMatches = calculatedExplicitSensitiveMatches;
                 // A match is only a candidate block: finish validation and checkpoints first.
-                if (changed && policy.Mode == "Block")
+                if (policy.Mode == "Observe")
+                {
+                    // Inspection is complete; deliberately return the captured original, never the writer.
+                    output = captured.ToArray();
+                }
+                else if (changed && policy.Mode == "Block")
                 {
                     output = PolicyBlocked;
                     completedOutcome = PrivacyInspectionOutcome.PolicyBlocked;
@@ -208,8 +213,8 @@ public sealed class PanResponseTransform
             if (value.ValueKind == JsonValueKind.Null) { CopyElement(value, writer, deadline); return false; }
             if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
             calculatedExplicitSensitiveMatches++;
-            // Block selects every string, including empty/non-PAN; never mask it or stop traversal.
-            if (policy.Mode == "Block") writer.WriteNullValue();
+            // Block/Observe select every string by declaration; never calculate masks or stop traversal.
+            if (policy.Mode is "Block" or "Observe") writer.WriteNullValue();
             else
             {
                 var text = value.GetString()!;
@@ -264,7 +269,7 @@ public sealed class PanResponseTransform
             if (value.ValueKind == JsonValueKind.Null) { CopyElement(value, writer, deadline); return false; }
             if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
             calculatedExplicitSensitiveMatches++;
-            if (mode == "Block") writer.WriteNullValue();
+            if (mode is "Block" or "Observe") writer.WriteNullValue();
             else
             {
                 var text = value.GetString()!;
@@ -288,7 +293,7 @@ public sealed class PanResponseTransform
             if (match)
             {
                 calculatedSecondaryPanMatches++;
-                if (mode == "Block") writer.WriteNullValue();
+                if (mode is "Block" or "Observe") writer.WriteNullValue();
                 else { writer.WriteStringValue(Mask(text)); calculatedMasks++; }
                 deadline.Check();
                 return true;

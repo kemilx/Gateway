@@ -1,4 +1,4 @@
-# MVP-29 — Contador explícito validado previo a Observe (RF11 parcial)
+# MVP-30 — Observe opt-in local/sintético (RF11 parcial)
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,84 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Observe (MVP-30): exposición deliberada, solo datos sintéticos locales
+
+**Observe entrega los datos originales**, incluso PAN, Email y Phone seleccionados
+o detectados. No enmascara ni bloquea por hallazgos. No activar sobre datos reales:
+no hay autorización de rollout, despliegue ni uso productivo. RF11 sigue parcial y
+RNF03 continúa pendiente de aceptación; este slice no certifica privacidad ni SLA.
+
+`Mode` admite los textos exactos `Mask`, `Block` y ahora `Observe`; null, vacío,
+espacios, distinta capitalización, números y desconocidos impiden arrancar. No hay
+otra opción ni gating: el opt-in es un override explícito local, congelado al
+arrancar. Ningún appsettings, selector, versión, presupuesto o default Mask cambia.
+Con TestApi sintética ejecutándose en otra terminal como arriba:
+
+```powershell
+dotnet run --project Gateway -- --urls http://127.0.0.1:5100 --PanPolicies:Policies:0:Mode Observe
+```
+
+El detector secundario conserva su opt-in independiente, desactivado por defecto.
+Para comprobarlo con datos sintéticos puede añadirse al comando
+`--PanPolicies:Policies:0:SecondaryPanDetection true`. La demo del panel sigue
+siendo SOLO Mask/Block y simulación sin API: no activa ni simula Observe.
+El summary muestra el Mode actual sin cambiar DTO/schema/API/JS.
+
+Observe **no es passthrough ni fail-open**: captura completa acotada, UTF-8 estricto,
+JSON/profundidad máxima 64, tipos terminales, codificación, límites, IO, deadline,
+lease y capacidad se validan como antes. Null pasa; otro terminal no-string falla
+cerrado. Los errores tardíos de validación impiden entregar el original y mantienen
+el 502 genérico existente. Tras iniciar la escritura, una cancelación o fallo puede
+dejar bytes originales parcialmente entregados; no se garantiza atomicidad ni
+sustitución por 502. Capacidad devuelve 503 sin leer. HEAD/204/304/non-JSON siguen
+excluidos. Cancelación, timeout y trabajo no cooperativo retienen el lease hasta
+cleanup real; callbacks síncronos pueden retenerlo.
+
+Solo tras inspección completa se selecciona **siempre el cuerpo capturado original
+byte por byte**: whitespace, escapes, duplicados y UTF-8, con status upstream,
+incluidos errores HTTP JSON. Nunca se entrega la salida del writer provisional.
+Esto es exactitud del **body capturado**, no wire exact ni preservación de headers,
+framing o trailers. Se mantienen no-store, eliminación de validadores/digests/firmas,
+Content-Type JSON UTF-8 y Content-Length final; otros headers no se inspeccionan
+ni se promete que sean privados. No hay cobertura para canales directos/non-JSON.
+
+CoverageContract acredita reglas configuradas, **no protección efectiva en Observe**.
+No se debilita ni se modifica: puede satisfacerse sin que los datos estén ocultos.
+Readiness NO garantiza privacidad, upstream disponible ni capacidad. La advertencia
+estática visible del panel informa esa diferencia sin mostrar valores sensibles.
+
+No se añaden instrumentos/tags/outcomes: éxito es `inspected`, máscaras siempre 0,
+sin llamar ni calcular máscaras. El contador explícito MVP29 cuenta strings **por
+declaración, no PII probada**, incluso vacíos/incompatibles; el secundario MVP28
+solo coincidencias fuera de reglas explícitas cuando está activo. Prioridad y
+algoritmo intactos. Conteos se confirman tras recorrido, writer.Dispose y deadline
+check: fallo previo descarta, fallo posterior conserva con outcome final. Bytes de
+salida preparada miden el original seleccionado, no entrega efectiva al cliente.
+
+Activación/rollback: instalar primero un binario compatible y reiniciar con el
+override opt-in solo en el entorno sintético local. Para desactivar, retirar el
+override (recupera Mask distribuido) o restaurar explícitamente Mask/Block y
+**reiniciar antes de volver al binario anterior**, que rechaza Observe. Sin
+migraciones ni dependencias nuevas; no se ha ejecutado despliegue.
+
+Validación sintética local MVP30: build Release de solución PASS, cero errores y
+advertencias; focal relevante **651/651 PASS**, suite completa **1001/1001 PASS**,
+cero omitidas. Incluye Kestrel real cliente → YARP → upstream sintético, errores
+HTTP JSON, bytes originales y barrera `Duration.Samples >= N` **y** presupuesto
+`0/0`. Se conservan build inicial fallido (propiedad test-only init) y focal
+**631/643** (comparación test-only int/long del mismo valor), corregidos solo en
+tests. Artefactos en scratch local externo, no en el repositorio. Revisiones
+independientes de código y seguridad **APPROVED_WITH_WARNINGS**, sin bloqueantes;
+Edge headless sobre copia de las DLL finales: **7/7 PASS**, incluidos aviso visible,
+Observe real con cuerpo original y máscaras cero, demo sin API, recuperación,
+320 px sin overflow documental y lectura cross-origin denegada.
+Los tests con StackTrace/checkpoints son sensibles al JIT/runtime y los relojes
+manuales no prueban entrega real del timer. Sin benchmark/sizing ni aprobación del
+producto o de producción; teclado y lector de pantalla exhaustivos no verificados.
+
+Las secciones MVP anteriores conservan evidencia histórica: sus afirmaciones de
+«sin Observe» describen aquellos incrementos, no el contrato vigente de MVP30.
 
 ### Coincidencias sensibles explícitas validadas (MVP-29, previo a Observe)
 
@@ -531,7 +609,7 @@ nuevo. No hay migraciones, paquetes nuevos ni despliegue realizado.
 ```
 
 - Options nativo enlaza tipos y aplica `ValidateOnStart`. Se exige entre 1 y 32 políticas; sección ausente, lista vacía o configuración inválida impiden arrancar/servir tráfico. YARP también valida al compilar sus transforms durante `Build`, antes de abrir el listener. Campos desconocidos se rechazan.
-- `PolicyId`, `Version` y `RouteId`: 1–64 caracteres ASCII, patrón `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; RouteId único con comparación ordinal y existente en el mismo conjunto de RouteConfig entregado a YARP (`protected-payment` o `passthrough` en esta demo). Una ruta inexistente impide Build/Start, nunca queda una política silenciosamente sin usar. `Mode` es obligatorio y acepta exclusivamente los textos exactos `Mask` y `Block`; números, distinta capitalización, espacios y vacío se rechazan. IDs/versiones acotados evitan inyección en logs y cardinalidad ilimitada durante el proceso.
+- `PolicyId`, `Version` y `RouteId`: 1–64 caracteres ASCII, patrón `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; RouteId único con comparación ordinal y existente en el mismo conjunto de RouteConfig entregado a YARP (`protected-payment` o `passthrough` en esta demo). Una ruta inexistente impide Build/Start, nunca queda una política silenciosamente sin usar. `Mode` es obligatorio y acepta exclusivamente los textos exactos `Mask`, `Block` y `Observe`; números, distinta capitalización, espacios y vacío se rechazan. IDs/versiones acotados evitan inyección en logs y cardinalidad ilimitada durante el proceso.
 - Selector estructural acotado (no JSONPath completo): `$` seguido de 1 a 16 pasos, cada uno una propiedad `.[A-Za-z_][A-Za-z0-9_]{0,63}` o comodín de array `[*]` explícito; máximo total 1041 caracteres. Se conservan los límites operativos anteriores, contando cada comodín como un paso. Ejemplos: `$.payment.cardNumber`, `$.payments[*].cardNumber`, `$.cards[*]`, `$.groups[*][*].cardNumber` y `$[*].cardNumber` para array raíz. Sin índices, filtros, descenso recursivo, comodín de propiedades, comillas ni escapes. Comparación ordinal case-sensitive; se visitan todos los duplicados y todos los elementos de arrays seleccionados. Un paso de propiedad solo recorre objetos y `[*]` solo arrays: otro tipo antes del terminal no coincide y se conserva. Arrays vacíos no cambian. Terminal `null` pasa; string aplica Mask o Block según Mode; otro tipo terminal falla cerrado para toda la respuesta, sin publicar una transformación parcial. Se comprueba cancelación/deadline por elemento; no cambia la reserva ni concurrencia.
 - `CoverageContract` es obligatorio: `Version` usa el mismo formato seguro de identificadores y `Required` contiene entre 1 y 32 pares RouteId/Selector. Cada RouteId debe ser conocido; la unicidad es por par RouteId/Selector, permitiendo varios selectores de la misma ruta. Cada selector usa la gramática anterior y cada par debe coincidir **exactamente (ordinal, case-sensitive)** con la regla principal o una adicional de la política efectiva. Cambiar solo ruta o selector, omitir cobertura, duplicar pares o configurar un contrato inválido impide Build/Start. Es cobertura **mínima**, no necesariamente completa. La versión identifica el contrato; no debe coincidir necesariamente con la versión de cada política y la suministra el operador.
 - El contrato detecta desviaciones de las políticas respecto a una cobertura declarada, no descubre dónde existe PAN. **Cambiar conjuntamente política y contrato es un cambio de seguridad que requiere revisión** (y versionado explícito del contrato). No protege frente a quien controla ambos archivos/configuración o sus sobrescrituras: ese control está dentro del límite de confianza. El valor distribuido exige `protected-payment` + `$.payment.cardNumber`; migrar configuraciones anteriores requiere añadir explícitamente el contrato antes de iniciar esta versión.

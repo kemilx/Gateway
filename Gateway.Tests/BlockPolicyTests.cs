@@ -32,6 +32,7 @@ public sealed class BlockPolicyTests
     [Theory]
     [InlineData("Mask")]
     [InlineData("Block")]
+    [InlineData("Observe")]
     public async Task Exact_modes_compile_into_immutable_catalog(string mode)
     {
         await using var app = GatewayHost.Build([], configure: b =>
@@ -72,7 +73,7 @@ public sealed class BlockPolicyTests
         var mode = scenario switch
         {
             "lower" => "block", "upper" => "BLOCK", "leading" => " Block", "trailing" => "Block ",
-            "empty" => "", "missing" => null, "numeric" => "2", "observe" => "Observe", "newline" => "Block\n",
+            "empty" => "", "missing" => null, "numeric" => "2", "observe" => "observe", "newline" => "Block\n",
             _ => throw new ArgumentException(nameof(scenario))
         };
         var failure = Assert.Throws<InvalidOperationException>(() => GatewayHost.Build([], configure: b =>

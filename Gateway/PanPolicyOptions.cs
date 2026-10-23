@@ -79,13 +79,13 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
         {
             if (policy is null || !SafeIdentifier(policy.PolicyId) || !SafeIdentifier(policy.Version)
                 || !SafeIdentifier(policy.RouteId) || !knownRouteIds.Contains(policy.RouteId) || !routes.Add(policy.RouteId)
-                || policy.Mode is not ("Mask" or "Block")
+                || policy.Mode is not ("Mask" or "Block" or "Observe")
                 || policy.Transformation is not ("PAN" or "Email" or "Phone")
                 || !SafeSelector(policy.Selector)
                 || !ValidRules(policy)
                 || policy.MaxBodyBytes is <= 0 or > MaximumBodyBytes
                 || policy.MaxBodyBytes > options.InspectionBudget.MaxReservedBodyBytes)
-                return ValidateOptionsResult.Fail("Invalid PAN policy: check identifiers, unique existing RouteId, exact Mask or Block mode, exact PAN, Email or Phone transformation, property/array selector and body limit.");
+                return ValidateOptionsResult.Fail("Invalid PAN policy: check identifiers, unique existing RouteId, exact Mask, Block or Observe mode, exact PAN, Email or Phone transformation, property/array selector and body limit.");
         }
 
         var contract = options.CoverageContract;
