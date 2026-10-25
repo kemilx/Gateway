@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Immutable;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -122,12 +123,18 @@ public sealed class PanResponseTransform
                 long calculatedMasks = 0;
                 long calculatedSecondaryPanMatches = 0;
                 long calculatedExplicitSensitiveMatches = 0;
+                // Fixed positional accounting is response-local. Public policies outside the
+                // catalog contract retain legacy inspection but produce no rule events.
+                var ruleCounts = HasSafeRuleMetadata(policy) ? new long[17] : null;
                 using (var writer = new Utf8JsonWriter(transformed))
                     changed = policy.AdditionalRules.IsEmpty && !policy.SecondaryPanDetection
                         ? WriteSelected(document.RootElement, writer, policy, 0, deadline, ref calculatedMasks, ref calculatedExplicitSensitiveMatches)
                         : WriteMultiple(document.RootElement, writer, MultiRuleSelection.Build(policy, deadline),
-                            policy.Mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, ref calculatedExplicitSensitiveMatches, policy.SecondaryPanDetection);
+                            policy.Mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, ref calculatedExplicitSensitiveMatches, policy.SecondaryPanDetection, ruleCounts);
                 deadline.Check();
+                if (ruleCounts is not null && policy.AdditionalRules.IsEmpty && !policy.SecondaryPanDetection)
+                    ruleCounts[0] = calculatedExplicitSensitiveMatches;
+                var ruleSnapshot = SnapshotRules(policy, ruleCounts);
                 // Commit only a fully validated traversal, never partial substitutions.
                 // This measures calculation, not PAN detection or downstream delivery.
                 inspection.ValidatedMasks = calculatedMasks;
@@ -135,6 +142,7 @@ public sealed class PanResponseTransform
                 inspection.ValidatedSecondaryPanMatches = calculatedSecondaryPanMatches;
                 // Declaration-selected strings, not proof of PAN/Email/Phone or delivery.
                 inspection.ValidatedExplicitSensitiveMatches = calculatedExplicitSensitiveMatches;
+                inspection.RuleMatches = ruleSnapshot;
                 // A match is only a candidate block: finish validation and checkpoints first.
                 if (policy.Mode == "Observe")
                 {
@@ -216,21 +224,65 @@ public sealed class PanResponseTransform
 
     internal void RecordInspectionCompleted(CompiledPanPolicy policy, string? serviceId, PrivacyTelemetry.InspectionSummary summary)
     {
+        if (!IsSafeIdentifier(policy.RouteId) || !IsSafeIdentifier(policy.PolicyId)
+            || !IsSafeIdentifier(policy.Version)) return;
+        string? correlation = null;
         try
         {
-            if (!logger.IsEnabled(LogLevel.Information)) return;
-            if (!IsSafeIdentifier(policy.RouteId) || !IsSafeIdentifier(policy.PolicyId)
-                || !IsSafeIdentifier(policy.Version)) return;
-            var service = IsSafeIdentifier(serviceId) ? serviceId! : "unknown";
-            var correlation = Guid.NewGuid().ToString("N");
-            logger.LogInformation(new EventId(5, "PrivacyInspectionCompleted"),
-                "Privacy inspection completed; schema {SchemaVersion} route {RouteId} service {ServiceId} policy {PolicyId} version {PolicyVersion} correlation {CorrelationId} outcome {Outcome} validated masks {ValidatedMasks} validated explicit sensitive matches {ValidatedExplicitSensitiveMatches} validated secondary PAN matches {ValidatedSecondaryPanMatches}.",
-                1, policy.RouteId, service, policy.PolicyId, policy.Version, correlation,
-                PrivacyTelemetry.GetOutcomeName(summary.Outcome), summary.ValidatedMasks,
-                summary.ValidatedExplicitSensitiveMatches, summary.ValidatedSecondaryPanMatches);
+            if (logger.IsEnabled(LogLevel.Information))
+            {
+                var service = IsSafeIdentifier(serviceId) ? serviceId! : "unknown";
+                correlation ??= Guid.NewGuid().ToString("N");
+                logger.LogInformation(new EventId(5, "PrivacyInspectionCompleted"),
+                    "Privacy inspection completed; schema {SchemaVersion} route {RouteId} service {ServiceId} policy {PolicyId} version {PolicyVersion} correlation {CorrelationId} outcome {Outcome} validated masks {ValidatedMasks} validated explicit sensitive matches {ValidatedExplicitSensitiveMatches} validated secondary PAN matches {ValidatedSecondaryPanMatches}.",
+                    1, policy.RouteId, service, policy.PolicyId, policy.Version, correlation,
+                    PrivacyTelemetry.GetOutcomeName(summary.Outcome), summary.ValidatedMasks,
+                    summary.ValidatedExplicitSensitiveMatches, summary.ValidatedSecondaryPanMatches);
+            }
         }
         catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException)) { }
+        PublishRules();
+
+        void PublishRules()
+        {
+            if (summary.RuleMatches.IsDefaultOrEmpty) return;
+            foreach (var rule in summary.RuleMatches)
+            {
+                try
+                {
+                    if (!logger.IsEnabled(LogLevel.Information)) continue;
+                    correlation ??= Guid.NewGuid().ToString("N");
+                    logger.LogInformation(new EventId(6, "PrivacyRuleMatched"),
+                        "Privacy rule matched; schema {SchemaVersion} route {RouteId} service {ServiceId} policy {PolicyId} version {PolicyVersion} correlation {CorrelationId} outcome {Outcome} rule {RuleId} transformation {Transformation} validated matches {ValidatedMatches} validated masks {ValidatedMasks}.",
+                        1, policy.RouteId, IsSafeIdentifier(serviceId) ? serviceId! : "unknown", policy.PolicyId, policy.Version,
+                        correlation, PrivacyTelemetry.GetOutcomeName(summary.Outcome), rule.RuleId, rule.Transformation,
+                        rule.ValidatedMatches, rule.ValidatedMasks);
+                }
+                catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException)) { }
+            }
+        }
     }
+
+    private static bool HasSafeRuleMetadata(CompiledPanPolicy policy) => policy.AdditionalRules.Length <= 15
+        && IsTransformation(policy.Transformation) && policy.AdditionalRules.All(r => IsTransformation(r.Transformation));
+
+    private static bool IsTransformation(string value) => value is "PAN" or "Email" or "Phone";
+
+    private static ImmutableArray<PrivacyTelemetry.RuleMatch> SnapshotRules(CompiledPanPolicy policy, long[]? counts)
+    {
+        if (counts is null) return [];
+        var snapshot = ImmutableArray.CreateBuilder<PrivacyTelemetry.RuleMatch>();
+        for (var i = 0; i < counts.Length; i++)
+        {
+            if (counts[i] <= 0) continue;
+            snapshot.Add(new(i == 0 ? "primary" : i == 16 ? "secondary-pan" : AdditionalRuleIds[i - 1],
+                i == 0 ? policy.Transformation : i == 16 ? "PAN" : policy.AdditionalRules[i - 1].Transformation,
+                counts[i], policy.Mode is "Block" or "Observe" ? 0 : counts[i]));
+        }
+        return snapshot.ToImmutable();
+    }
+
+    private static readonly ImmutableArray<string> AdditionalRuleIds = ["additional-0", "additional-1", "additional-2", "additional-3", "additional-4", "additional-5", "additional-6", "additional-7", "additional-8", "additional-9", "additional-10", "additional-11", "additional-12", "additional-13", "additional-14"];
 
     private void RecordExclusion(CompiledPanPolicy policy, string? serviceId, string reason)
     {
@@ -315,7 +367,7 @@ public sealed class PanResponseTransform
     private static bool WriteMultiple(JsonElement value, Utf8JsonWriter writer, MultiRuleSelection? selection,
         string mode, InspectionDeadline deadline, ref long calculatedMasks, ref long calculatedSecondaryPanMatches,
         ref long calculatedExplicitSensitiveMatches,
-        bool secondaryPanDetection = false)
+        bool secondaryPanDetection = false, long[]? ruleCounts = null)
     {
         deadline.Check();
         if (selection?.Transformation is { } transformation)
@@ -323,6 +375,7 @@ public sealed class PanResponseTransform
             if (value.ValueKind == JsonValueKind.Null) { CopyElement(value, writer, deadline); return false; }
             if (value.ValueKind != JsonValueKind.String) throw new InspectionException();
             calculatedExplicitSensitiveMatches++;
+            if (ruleCounts is not null) ruleCounts[selection.RuleIndex]++;
             if (mode is "Block" or "Observe") writer.WriteNullValue();
             else
             {
@@ -347,6 +400,7 @@ public sealed class PanResponseTransform
             if (match)
             {
                 calculatedSecondaryPanMatches++;
+                if (ruleCounts is not null) ruleCounts[16]++;
                 if (mode is "Block" or "Observe") writer.WriteNullValue();
                 else { writer.WriteStringValue(Mask(text)); calculatedMasks++; }
                 deadline.Check();
@@ -364,7 +418,7 @@ public sealed class PanResponseTransform
                 writer.WritePropertyName(property.Name);
                 var child = selection?.Properties.GetValueOrDefault(property.Name);
                 if (child is not null || secondaryPanDetection)
-                    changed |= WriteMultiple(property.Value, writer, child, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, ref calculatedExplicitSensitiveMatches, secondaryPanDetection);
+                    changed |= WriteMultiple(property.Value, writer, child, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, ref calculatedExplicitSensitiveMatches, secondaryPanDetection, ruleCounts);
                 else CopyElement(property.Value, writer, deadline);
             }
             writer.WriteEndObject();
@@ -375,7 +429,7 @@ public sealed class PanResponseTransform
             foreach (var element in value.EnumerateArray())
             {
                 deadline.Check();
-                changed |= WriteMultiple(element, writer, selection?.ArrayItem, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, ref calculatedExplicitSensitiveMatches, secondaryPanDetection);
+                changed |= WriteMultiple(element, writer, selection?.ArrayItem, mode, deadline, ref calculatedMasks, ref calculatedSecondaryPanMatches, ref calculatedExplicitSensitiveMatches, secondaryPanDetection, ruleCounts);
             }
             writer.WriteEndArray();
         }

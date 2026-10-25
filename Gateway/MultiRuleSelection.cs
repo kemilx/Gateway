@@ -7,17 +7,19 @@ internal sealed class MultiRuleSelection
     internal Dictionary<string, MultiRuleSelection> Properties { get; } = new(StringComparer.Ordinal);
     internal MultiRuleSelection? ArrayItem { get; private set; }
     internal string? Transformation { get; private set; }
+    internal int RuleIndex { get; private set; }
 
     internal static MultiRuleSelection Build(CompiledPanPolicy policy, InspectionDeadline deadline)
     {
         deadline.Check();
         var root = new MultiRuleSelection();
-        Add(policy.Segments, policy.Transformation);
-        foreach (var rule in policy.AdditionalRules) Add(rule.Segments, rule.Transformation);
+        Add(policy.Segments, policy.Transformation, 0);
+        for (var i = 0; i < policy.AdditionalRules.Length; i++)
+            Add(policy.AdditionalRules[i].Segments, policy.AdditionalRules[i].Transformation, i + 1);
         deadline.Check();
         return root;
 
-        void Add(System.Collections.Immutable.ImmutableArray<string> steps, string transformation)
+        void Add(System.Collections.Immutable.ImmutableArray<string> steps, string transformation, int ruleIndex)
         {
             var node = root;
             foreach (var step in steps)
@@ -32,6 +34,7 @@ internal sealed class MultiRuleSelection
                 }
             }
             node.Transformation = transformation;
+            node.RuleIndex = ruleIndex;
         }
     }
 }

@@ -94,6 +94,10 @@ public sealed class PrivacyInspectionEventTests
         if (mode == "Block") Assert.Equal("{\"code\":\"privacy_response_blocked\"}", f.Text);
         if (mode == "Mask") { Assert.DoesNotContain("4111111111111111", f.Text); Assert.Contains("null", f.Text); }
         Assert.Equal((0, 0L), f.Budget.Snapshot);
+        Assert.Equal(new[] { "primary", "additional-0", "secondary-pan" }, f.Logs.Rules.Select(e => e.State["RuleId"]));
+        Assert.Equal(new long[] { 3, 1, 1 }, f.Logs.Rules.Select(e => Assert.IsType<long>(e.State["ValidatedMatches"])));
+        Assert.All(f.Logs.Rules, e => Assert.Equal(mode == "Mask" ? (long)e.State["ValidatedMatches"]! : 0L, e.State["ValidatedMasks"]));
+        Assert.All(f.Logs.Rules, e => Assert.Equal(f.Logs.Events.Single().State["CorrelationId"], e.State["CorrelationId"]));
     }
 
     [Theory]
@@ -103,6 +107,7 @@ public sealed class PrivacyInspectionEventTests
         var body = scenario == "null" ? "{\"selected\":null}" : scenario == "absent" ? "{}" : "{\"selected\":42}";
         using var f = new Fixture(body, scenario == "intermediate" ? Policy() with { Segments = ["selected", "nested"] } : Policy());
         await f.Run(); Assert.Equal(body, f.Text); AssertEvent(Assert.Single(f.Logs.Events), "inspected", 0, 0, 0);
+        Assert.Empty(f.Logs.Rules);
     }
 
     [Theory]
@@ -114,6 +119,7 @@ public sealed class PrivacyInspectionEventTests
         await f.Run(); Assert.Equal(502, f.Context.HttpContext.Response.StatusCode);
         Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", f.Text);
         AssertEvent(Assert.Single(f.Logs.Events), "blocked", 0, 0, 0);
+        Assert.Empty(f.Logs.Rules);
     }
 
     [Theory]
@@ -136,6 +142,8 @@ public sealed class PrivacyInspectionEventTests
         else if (failure == "fault") await Assert.ThrowsAsync<InvalidOperationException>(f.Run);
         else await Assert.ThrowsAsync<IOException>(f.Run);
         AssertEvent(Assert.Single(f.Logs.Events), failure == "cancel" ? "canceled" : failure == "timeout" ? "timed_out" : failure == "write" ? "write_error" : "faulted", mode == "Mask" ? 2 : 0, 1, 1);
+        Assert.Equal(2, f.Logs.Rules.Count);
+        Assert.All(f.Logs.Rules, e => { Assert.Equal(f.Logs.Events.Single().State["Outcome"], e.State["Outcome"]); Assert.Equal(1L, e.State["ValidatedMatches"]); Assert.Equal(mode == "Mask" ? 1L : 0L, e.State["ValidatedMasks"]); });
         Assert.Equal((0, 0L), f.Budget.Snapshot);
     }
 
@@ -156,6 +164,7 @@ public sealed class PrivacyInspectionEventTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(f.Run);
         Assert.True(triggered); Assert.Empty(f.Text);
         AssertEvent(Assert.Single(f.Logs.Events), cancel ? "canceled" : "timed_out", 0, 0, 0);
+        Assert.Empty(f.Logs.Rules);
     }
 
     [Fact]
@@ -190,7 +199,7 @@ public sealed class PrivacyInspectionEventTests
         Assert.Equal(200, f.Context.HttpContext.Response.StatusCode); Assert.Equal("{\"selected\":\"************1111\"}", f.Text);
         Assert.Equal("no-store", f.Context.HttpContext.Response.Headers.CacheControl);
         Assert.Equal(1, metrics.Terminals); Assert.Equal(1, f.Telemetry.DashboardMetrics.Duration.Samples); Assert.Equal((0, 0L), f.Budget.Snapshot);
-        Assert.Equal(1, f.Logs.EnabledCalls); Assert.Equal(behavior.StartsWith("log-") || behavior == "normal" ? 1 : 0, f.Logs.EventAttempts);
+        Assert.Equal(2, f.Logs.EnabledCalls); Assert.Equal(behavior.StartsWith("log-") || behavior == "normal" ? 1 : 0, f.Logs.EventAttempts);
         if (behavior == "normal") AssertEvent(Assert.Single(f.Logs.Events), "inspected", 1, 1, 0); else Assert.Empty(f.Logs.Events);
         Assert.Contains(1, f.Logs.LegacyIds);
     }
@@ -227,6 +236,7 @@ public sealed class PrivacyInspectionEventTests
         using var metrics = new Metrics();
         using var f = new Fixture(Body, Policy() with { RouteId = field == "route" ? invalid! : "protected-payment", PolicyId = field == "policy" ? invalid! : "EventPolicy", Version = field == "version" ? invalid! : "v1" });
         await f.Run(); Assert.Empty(f.Logs.Events); Assert.Equal(0, f.Logs.EventAttempts);
+        Assert.Empty(f.Logs.Rules);
         Assert.Equal(1, metrics.Terminals); Assert.Equal(200, f.Context.HttpContext.Response.StatusCode);
         Assert.Equal("{\"selected\":\"************1111\"}", f.Text); Assert.Contains(1, f.Logs.LegacyIds);
     }
@@ -240,6 +250,7 @@ public sealed class PrivacyInspectionEventTests
         var policy = valid ? Policy() with { RouteId = value!, PolicyId = value!, Version = value! } : Policy();
         using var f = new Fixture(Body, policy); await f.Transform.ApplyAsync(f.Context, policy, value);
         AssertEvent(Assert.Single(f.Logs.Events), "inspected", 1, 1, 0, valid ? value! : "unknown", policy);
+        Assert.Equal(valid ? value! : "unknown", Assert.Single(f.Logs.Rules).State["ServiceId"]);
     }
 
     [Theory]
@@ -254,6 +265,7 @@ public sealed class PrivacyInspectionEventTests
         if (scenario == "precancel") { f.Caller.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(f.Run); }
         else await f.Run();
         Assert.Empty(f.Logs.Events); Assert.Equal(0, f.Logs.EventAttempts); Assert.Equal((0, 0L), f.Budget.Snapshot);
+        Assert.Empty(f.Logs.Rules);
         Assert.Equal(0, f.Telemetry.DashboardMetrics.Duration.Samples);
         Assert.Equal(scenario is "head" or "204" or "304" or "media" ? 1 : 0, f.Logs.Exclusions);
     }
@@ -266,6 +278,7 @@ public sealed class PrivacyInspectionEventTests
         await f.Run(); AssertEvent(Assert.Single(f.Logs.Events), "capacity_exceeded", 0, 0, 0);
         Assert.Equal(503, f.Context.HttpContext.Response.StatusCode); Assert.Equal("{\"code\":\"privacy_capacity_exceeded\"}", f.Text);
         Assert.Equal(0, f.Telemetry.DashboardMetrics.Duration.Samples); Assert.Contains(3, f.Logs.LegacyIds);
+        Assert.Empty(f.Logs.Rules);
     }
 
     [Fact]
@@ -311,6 +324,13 @@ public sealed class PrivacyInspectionEventTests
         AssertEvent(Assert.Single(logs.Events, e => Equals(e.State["PolicyId"], "first")), "inspected", 1, 1, 0, "service-first", a.Policy);
         AssertEvent(Assert.Single(logs.Events, e => Equals(e.State["PolicyId"], "second")), "inspected", 3, 3, 0, "service-second", b.Policy);
         Assert.Equal(2, logs.Events.Select(e => e.State["CorrelationId"]).Distinct().Count());
+        Assert.Equal(2, logs.Rules.Count);
+        foreach (var rule in logs.Rules)
+        {
+            var terminal = Assert.Single(logs.Events, e => Equals(e.State["PolicyId"], rule.State["PolicyId"]));
+            Assert.Equal(terminal.State["CorrelationId"], rule.State["CorrelationId"]);
+            Assert.Equal(terminal.State["ValidatedExplicitSensitiveMatches"], rule.State["ValidatedMatches"]);
+        }
     }
 
     [Theory]
@@ -334,11 +354,21 @@ public sealed class PrivacyInspectionEventTests
             Assert.True(response.Headers.CacheControl!.NoStore); Assert.False(response.Headers.Contains("X-Correlation-Id"));
         }
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        while (logs.Events.Count < 2) await Task.Delay(10, timeout.Token);
+        while (logs.Events.Count < 2 || logs.Rules.Count < 2) await Task.Delay(10, timeout.Token);
         var policy = gateway.Services.GetRequiredService<PanPolicyCatalog>().Find("protected-payment")!;
         foreach (var item in logs.Events) { AssertEvent(item, mode == "Block" ? "policy_blocked" : "inspected", mode == "Mask" ? 1 : 0, 1, 0, "synthetic-api", policy); Assert.DoesNotContain("marker", item.Rendered); Assert.DoesNotContain(Address(api), item.Rendered); }
         Assert.Equal(2, logs.Events.Select(e => e.State["CorrelationId"]).Distinct().Count());
+        Assert.Equal(2, logs.Rules.Count);
+        foreach (var rule in logs.Rules)
+        {
+            var terminal = Assert.Single(logs.Events, e => Equals(e.State["CorrelationId"], rule.State["CorrelationId"]));
+            Assert.Equal("primary", rule.State["RuleId"]); Assert.Equal("PAN", rule.State["Transformation"]);
+            Assert.Equal(1L, rule.State["ValidatedMatches"]); Assert.Equal(mode == "Mask" ? 1L : 0L, rule.State["ValidatedMasks"]);
+            Assert.Equal(terminal.State["Outcome"], rule.State["Outcome"]); Assert.Equal("synthetic-api", rule.State["ServiceId"]);
+            Assert.DoesNotContain("marker", rule.Rendered); Assert.DoesNotContain(Address(api), rule.Rendered);
+        }
         using var raw = await client.GetAsync("/passthrough/terminal"); Assert.Equal(body, await raw.Content.ReadAsStringAsync()); Assert.Equal(2, logs.Events.Count);
+        Assert.Equal(2, logs.Rules.Count);
         Assert.Equal((0, 0L), gateway.Services.GetRequiredService<InspectionBudget>().Snapshot);
     }
 
@@ -356,11 +386,12 @@ public sealed class PrivacyInspectionEventTests
         Assert.Equal($"Privacy inspection completed; schema 1 route {policy.RouteId} service {service} policy {policy.PolicyId} version {policy.Version} correlation {correlation} outcome {outcome} validated masks {masks} validated explicit sensitive matches {explicitMatches} validated secondary PAN matches {secondary}.", item.Rendered);
     }
 
-    private sealed record Event(LogLevel Level, EventId Id, Dictionary<string, object?> State, Exception? Exception, string Rendered);
-    private sealed class Logs : ILogger<PanResponseTransform>, ILoggerProvider
+    internal sealed record Event(LogLevel Level, EventId Id, Dictionary<string, object?> State, Exception? Exception, string Rendered);
+    internal sealed class Logs : ILogger<PanResponseTransform>, ILoggerProvider
     {
         public string Behavior = "normal"; public int EnabledCalls, EventAttempts, Exclusions; public int ThrowLegacy; public Action? OnEvent;
         public readonly ConcurrentQueue<Event> Events = new(); public readonly ConcurrentQueue<int> LegacyIds = new();
+        public readonly ConcurrentQueue<Event> Rules = new();
         public ILogger CreateLogger(string categoryName) => this;
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel)
@@ -374,6 +405,11 @@ public sealed class PrivacyInspectionEventTests
         {
             if (id.Id is >= 1 and <= 3) { LegacyIds.Enqueue(id.Id); if (ThrowLegacy == id.Id) throw new InvalidOperationException("legacy_marker"); }
             if (id.Id == 4) Interlocked.Increment(ref Exclusions);
+            if (id.Id == 6)
+            {
+                if (Behavior is "log-error" or "log-cancel") throw new InvalidOperationException("logger_marker");
+                Rules.Enqueue(new(level, id, ((IEnumerable<KeyValuePair<string, object?>>)(object)state!).ToDictionary(x => x.Key, x => x.Value), exception, formatter(state, exception)));
+            }
             if (id.Id != 5) return;
             Interlocked.Increment(ref EventAttempts);
             if (Behavior == "log-error") throw new InvalidOperationException("logger_marker");
@@ -383,7 +419,7 @@ public sealed class PrivacyInspectionEventTests
         }
         public void Dispose() { }
     }
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         public readonly InspectionBudget Budget = PrivacyInspectionEventTests.Budget(); public readonly PrivacyTelemetry Telemetry;
         public readonly Logs Logs = new(); public readonly ManualClock Clock = new(); public readonly CancellationTokenSource Caller = new();
@@ -399,7 +435,7 @@ public sealed class PrivacyInspectionEventTests
         public string Text => Encoding.UTF8.GetString(output.ToArray());
         public void Dispose() { Context.ProxyResponse?.Dispose(); Telemetry.Dispose(); Caller.Dispose(); output.Dispose(); }
     }
-    private sealed class ManualClock : TimeProvider
+    internal sealed class ManualClock : TimeProvider
     {
         private long ticks; public Action? OnTimestamp;
         public override long TimestampFrequency => TimeSpan.TicksPerSecond;

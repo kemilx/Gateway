@@ -77,8 +77,11 @@ public sealed class PrivacyTelemetry : IDisposable
     internal InspectionMeasurement? TryStartInspection(CompiledPanPolicy policy, TimeProvider clock)
         => TryStartInspection(policy, clock, null);
 
+    internal readonly record struct RuleMatch(string RuleId, string Transformation, long ValidatedMatches, long ValidatedMasks);
+
     internal readonly record struct InspectionSummary(PrivacyInspectionOutcome Outcome, long ValidatedMasks,
-        long ValidatedExplicitSensitiveMatches, long ValidatedSecondaryPanMatches);
+        long ValidatedExplicitSensitiveMatches, long ValidatedSecondaryPanMatches,
+        System.Collections.Immutable.ImmutableArray<RuleMatch> RuleMatches = default);
 
     internal InspectionMeasurement? TryStartInspection(CompiledPanPolicy policy, TimeProvider clock,
         Action<InspectionSummary>? completed)
@@ -236,6 +239,7 @@ public sealed class PrivacyTelemetry : IDisposable
         internal long ValidatedMasks { get; set; }
         internal long ValidatedSecondaryPanMatches { get; set; }
         internal long ValidatedExplicitSensitiveMatches { get; set; }
+        internal System.Collections.Immutable.ImmutableArray<RuleMatch> RuleMatches { get; set; }
 
         internal InspectionMeasurement(PrivacyTelemetry telemetry, CompiledPanPolicy policy, IDisposable lease, TimeProvider clock, long startedAt)
             : this(telemetry, policy, lease, clock, startedAt, null) { }
@@ -257,7 +261,7 @@ public sealed class PrivacyTelemetry : IDisposable
                 throw new ArgumentOutOfRangeException(nameof(outcome));
             if (Interlocked.Exchange(ref completed, 1) != 0) return;
 
-            var summary = new InspectionSummary(outcome, ValidatedMasks, ValidatedExplicitSensitiveMatches, ValidatedSecondaryPanMatches);
+            var summary = new InspectionSummary(outcome, ValidatedMasks, ValidatedExplicitSensitiveMatches, ValidatedSecondaryPanMatches, RuleMatches);
             try
             {
                 telemetry.RecordOutcome(policy, outcome, clock.GetElapsedTime(StartedAt).TotalMilliseconds,

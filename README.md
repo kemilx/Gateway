@@ -1,4 +1,4 @@
-# MVP-33 — Eventos terminales de inspección local/sintética (RF11 parcial)
+# MVP-34 — Eventos agregados por regla local/sintética (RF11 parcial)
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,70 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Eventos agregados por regla (MVP-34)
+
+Después de intentar event5, la terminal ganadora intenta un evento `Information`,
+`EventId(6, "PrivacyRuleMatched")`, por cada regla con matches validados. Plantilla
+exacta, excepción null:
+
+```text
+Privacy rule matched; schema {SchemaVersion} route {RouteId} service {ServiceId} policy {PolicyId} version {PolicyVersion} correlation {CorrelationId} outcome {Outcome} rule {RuleId} transformation {Transformation} validated matches {ValidatedMatches} validated masks {ValidatedMasks}.
+```
+
+Estado exacto: esos once campos más `{OriginalFormat}`; `SchemaVersion=1` int,
+`ValidatedMatches` long >0, `ValidatedMasks` long >=0, demás campos string.
+`RuleId` es exclusivamente `primary`, `additional-0`..`additional-14` por posición
+en AdditionalRules normalizado, o `secondary-pan`. **Identidad posicional, estable
+solo dentro de una versión**, no identidad estable de negocio. Un cambio de orden
+debe distinguirse con `PolicyVersion`; este slice no añade enforcement de versión.
+Nunca se deriva identidad del selector, hash ni valor. `Transformation` solo puede
+ser `PAN`, `Email` o `Phone`; secundaria siempre `PAN`.
+
+Son conteos agregados de strings seleccionados por declaración: no prueba de PII
+individual ni de entrega. Observe y Block cuentan matches y cero máscaras. Las
+reglas explícitas conservan prioridad sobre secundaria sin doble conteo, incluso
+si su transformación declarada es Email/Phone. Se recorren duplicados y arrays.
+Sumar matches explícitos/secundarios y máscaras de event6 reproduce los respectivos
+conteos de event5 (si el productor habilita y valida todos los eventos del lote).
+
+El acumulador local tiene 17 posiciones; un snapshot inmutable se confirma junto
+a los conteos tras recorrido, Dispose del writer y check de deadline. Fallos antes
+descartan todo event6; después conservan el snapshot con el outcome terminal final.
+La notificación ocurre después de métricas y liberar el lease de inspección, fuera
+de locks. Ningún payload/contexto ni acumulador mutable pasa al callback.
+
+Event5 y event6 comparten un GUID nuevo por invocación (`N`, 32 hex minúsculas),
+solo local, nunca de Activity/headers ni propagado por HTTP. IDs inválidos de
+ruta/política/versión omiten ambos; servicio inválido usa `unknown`. Una política
+pública con más de 16 reglas explícitas o cualquier transformación fuera de la
+allowlist omite **todos** los eventos6, sin truncar ni alterar inspección/event5.
+Capacity, exclusiones, upstream/política ausente y precancelación no generan event6.
+Event4/5 conservan IDs, plantillas y campos; APIs públicas, configuración, catálogo,
+defaults, métricas/tags, HTTP y dependencias no cambian.
+
+Cada publicación tiene su propio IsEnabled/Log aislado ante fallos ordinarios;
+fallar event5 o una regla no suprime las siguientes. Con Information deshabilitado
+no se preparan correlación ni argumentos de evento. No hay retry, tasks, colas,
+historial ni estado global de logging nuevo. Máximo **18 eventos por lote**
+(event5 + hasta 17 event6), además de los eventos preexistentes: **no es rate cap**.
+Providers síncronos pueden retener admisión de proxy y demorar el retorno, pero ya
+no el lease de inspección. La garantía de allowlist/orden/intento es del productor,
+no de entrega, orden final ni enriquecimiento de un sink externo.
+
+Cambio aditivo sin migración ni orden obligatorio de despliegue; consumidores
+pueden aceptar event6/schema1 primero. Rollback a MVP33 retira solo event6 y su
+snapshot interno; no cambia contratos públicos ni persistencia. RF11 sigue
+**parcial**: correlación distribuida, reload y RNF pendientes; no producción ni
+aprobación de producto. Validación MVP34 y manifiestos se conservan en scratch
+externo `MVP34-rule-events`; la evidencia de MVP33 de abajo es histórica.
+
+Validación local MVP34: build Release de solución PASS (0 advertencias/errores),
+focal `PrivacyRuleEventTests|PrivacyInspectionEventTests` **148/148 PASS**,
+suite completa **1253/1253 PASS**, cero omitidas. HTTP YARP loopback real cubre
+Mask/Block/Observe, correlación compartida entre 5/6 y distinta entre requests;
+otros fallos terminales se validan por fixtures/seam, no se afirman por HTTP.
+Revisión independiente y aceptación del Coordinador pendientes.
 
 ### Eventos terminales de inspección (MVP-33)
 
