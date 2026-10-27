@@ -1,4 +1,4 @@
-# MVP-34 — Eventos agregados por regla local/sintética (RF11 parcial)
+# MVP-35 — Snapshots locales opt-in de políticas (RF12 limitado)
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -27,6 +27,125 @@ El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este 
 
 ## Contrato de configuración y arranque
 
+### Snapshots locales completos (MVP-35)
+
+**Opt-in**: `--LocalPolicySnapshotFile C:\ruta-controlada\policy.json`. Sin esa
+opción no se registra reader ni servicio/timer de reload; continúan los defaults
+y el catálogo inmutable de arranque. La opción presente pero vacía es inválida.
+En este slice el reader admite **solo Windows, disco fijo local**, ruta absoluta
+ordinaria y archivo regular; rechaza URLs, rutas relativas, UNC/red, namespaces
+device/pipe, alternate data streams y reparse points observables en archivo o
+ancestros. No es una API administrativa ni añade autenticación/autorización.
+
+El operador privilegiado debe controlar el directorio, ancestros y archivo mediante
+permisos del sistema operativo; no ponerlos bajo escritura de usuarios no confiables.
+La comprobación de ubicación **no resiste carreras de un adversario del filesystem**.
+No se abre ningún archivo elegido por requests HTTP. Lectura real acotada a 1 MiB
++ 1 byte para detectar exceso; máximo aceptado 1 MiB. No hay hashes de body,
+historial, caché de contenido, watcher, cola, exporter ni instrumentos nuevos.
+
+El archivo inicial válido y compatible es obligatorio **antes de servir**; un fallo
+aborta arranque con error genérico, sin fallback silencioso. También debe ser válida
+la configuración base habitual. El archivo contiene exclusivamente la raíz
+`PanPolicies`, completa y aislada, sin merge de appsettings, entorno o CLI. Se reutilizan
+binding estricto, validación y compilación normalizada existentes. Ejemplo completo,
+compatible con la base por defecto (PowerShell, directorio local previamente protegido):
+
+```powershell
+$file = 'C:\gateway-policy\policy.json'
+$policy = @'
+{
+  "PanPolicies": {
+    "InspectionBudget": {
+      "InspectionTimeoutSeconds": 10,
+      "MaxConcurrentInspections": 6,
+      "MaxReservedBodyBytes": 6291456
+    },
+    "CoverageContract": {
+      "Version": "v1",
+      "Required": [{ "RouteId": "protected-payment", "Selector": "$.payment.cardNumber" }]
+    },
+    "Policies": [{
+      "PolicyId": "PAN", "Version": "v1", "RouteId": "protected-payment",
+      "Mode": "Mask", "Transformation": "PAN", "Selector": "$.payment.cardNumber",
+      "MaxBodyBytes": 1048576, "SecondaryPanDetection": false, "AdditionalRules": []
+    }]
+  }
+}
+'@ | ConvertFrom-Json
+function Publish-LocalPolicy {
+  $temp = Join-Path (Split-Path $file) ('policy-' + [guid]::NewGuid().ToString('N') + '.tmp')
+  [IO.File]::WriteAllText($temp, ($policy | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+  [IO.File]::Move($temp, $file, $true)
+}
+Publish-LocalPolicy
+dotnet run --project Gateway -- --urls http://127.0.0.1:5100 --LocalPolicySnapshotFile $file
+```
+
+Usar temporal **en el mismo directorio/volumen y reemplazo atómico**; no editar el
+archivo activo in-place. Mantener TestApi en otra terminal como en «Ejecutar».
+En otra terminal, conservando `$policy`, `$file` y la función anterior:
+
+1. `curl.exe http://127.0.0.1:5100/protected/payment` muestra Mask/v1;
+   `/dashboard/api/summary` indica v1.
+2. `$policy.PanPolicies.Policies[0].Mode = 'Block'` y
+   `$policy.PanPolicies.Policies[0].Version = 'v2'`; `Publish-LocalPolicy`.
+   Tras una lectura válida, requests nuevas usan Block/v2 (respuesta bloqueada).
+3. Cambiar Mode a `Mask` sin cambiar v2 y publicar: se rechaza y se retiene Block/v2.
+4. Cambiar Version a `v3` y publicar: recuperación válida Mask/v3.
+
+Quedan congelados respecto a la base: conjunto de rutas protegidas, PolicyId por
+ruta, CoverageContract completo e InspectionBudget global. YARP, upstream, admisión,
+deadlines y listeners no pertenecen al archivo. Son mutables reglas/tipos, Mode,
+SecondaryPanDetection, MaxBodyBytes y Version sujetos al validador. Un comportamiento
+compilado distinto exige Version distinta de la **activa**, por política; no hay
+registro histórico que prohíba reutilizar versiones anteriores. Cambiar solo Version
+publica; contenido semánticamente idéntico no publica (defaults explícitos equivalentes
+no cuentan como cambio). La compatibilidad inicial fija se compara con la base;
+el archivo inicial establece la primera política activa antes de servir.
+
+Un único BackgroundService espera un segundo nominal, lee, valida/compara y publica
+una referencia atómica catálogo+metadatos inmutables. No solapa intentos ni acumula
+ticks. Es polling de ingeniería, **no SLA**; cancelación cooperativa no promete
+latencia universal de apagado ante filesystem bloqueado. La cancelación observada
+antes del swap conserva la activa. Cada instancia de PanPolicyCatalog sigue siendo
+inmutable: el servicio público de DI conserva la base; los consumidores internos
+capturan el snapshot activo. Cada request protegida captura después del routing y
+antes de transforms/envío upstream; incluso esperando headers mantiene su captura
+anterior. Requests en curso retienen snapshots antiguos en memoria hasta terminar.
+El summary del dashboard usa una sola captura; métricas siguen siendo totales de
+proceso, sin reset por publicación. DTO HTTP, controles y eventos 4/5/6 no cambian.
+
+Solo la nueva categoría `Gateway.LocalPolicyReloadService` se habilita adicionalmente
+en el filtro del host. EventId 7 (`LocalPolicySnapshot`), Information, plantilla fija
+`Local policy snapshot; status {Status} reason {Reason}.`: Status `applied`/Reason
+`none` por publicación real (incluida inicial); Status `rejected`/Reason exclusivamente
+`read_failed`, `too_large`, `invalid_configuration` o `incompatible_snapshot`.
+Sin ruta, archivo, selector, body ni excepción. Rechazos consecutivos con igual razón
+se suprimen; cualquier intento válido, incluso sin cambio, reinicia silenciosamente
+la supresión. El estado se confirma antes del logger, fallos ordinarios de IsEnabled
+o Log se aíslan sin retry ni rollback; no se garantiza entrega del log.
+
+Despliegue local: preparar base y archivo compatibles antes de habilitar la opción.
+Sin migración ni dependencias nuevas. **Retirar la opción antes de rollback binario**
+para no creer que un binario anterior recarga; conservar una base válida. RF12 cubre
+solo este alcance fijo/local por instancia; coordinación distribuida y RF11 distribuido
+siguen pendientes. RNF y producto no aprobados.
+
+Validación local sintética final: build Release sin errores ni advertencias,
+focal **72/72 PASS**, suite completa **1325/1325 PASS**, cero omitidos, y Edge
+**4/4 PASS** para actualización del panel, rechazo/recuperación y demo de solo lectura.
+Incluye HTTP real por YARP, captura anterior en vuelo, publicación atómica y
+cancelación/disposición/join de una lectura cooperativa retenida mediante seam interno;
+esta última no acredita cancelación universal de drivers. Revisiones independientes
+de código y seguridad **APPROVED_WITH_WARNINGS**, sin bloqueantes para este alcance.
+Junctions reales prueban rechazo antes de abrir, tanto en entrada como ancestro;
+el fixture de symlink real de archivo queda **NOT_RUN**, por privilegios insuficientes.
+La revisión de seguridad consideró proporcional esa cobertura junto al chequeo estático
+del mismo flag ReparsePoint; no se presenta el caso no ejecutado como PASS.
+La evidencia de fases anteriores y sus fallos de fixtures/compilación se conserva.
+Estos resultados no aprueban datos reales, despliegues ni operación productiva.
+
 ### Eventos agregados por regla (MVP-34)
 
 Después de intentar event5, la terminal ganadora intenta un evento `Information`,
@@ -42,7 +161,8 @@ Estado exacto: esos once campos más `{OriginalFormat}`; `SchemaVersion=1` int,
 `RuleId` es exclusivamente `primary`, `additional-0`..`additional-14` por posición
 en AdditionalRules normalizado, o `secondary-pan`. **Identidad posicional, estable
 solo dentro de una versión**, no identidad estable de negocio. Un cambio de orden
-debe distinguirse con `PolicyVersion`; este slice no añade enforcement de versión.
+debe distinguirse con `PolicyVersion`; MVP34 no añadía enforcement de versión
+(MVP35 sí lo exige para cambios de comportamiento publicados por reload opt-in).
 Nunca se deriva identidad del selector, hash ni valor. `Transformation` solo puede
 ser `PAN`, `Email` o `Phone`; secundaria siempre `PAN`.
 
@@ -859,12 +979,12 @@ nuevo. No hay migraciones, paquetes nuevos ni despliegue realizado.
 ```
 
 - Options nativo enlaza tipos y aplica `ValidateOnStart`. Se exige entre 1 y 32 políticas; sección ausente, lista vacía o configuración inválida impiden arrancar/servir tráfico. YARP también valida al compilar sus transforms durante `Build`, antes de abrir el listener. Campos desconocidos se rechazan.
-- `PolicyId`, `Version` y `RouteId`: 1–64 caracteres ASCII, patrón `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; RouteId único con comparación ordinal y existente en el mismo conjunto de RouteConfig entregado a YARP (`protected-payment` o `passthrough` en esta demo). Una ruta inexistente impide Build/Start, nunca queda una política silenciosamente sin usar. `Mode` es obligatorio y acepta exclusivamente los textos exactos `Mask`, `Block` y `Observe`; números, distinta capitalización, espacios y vacío se rechazan. IDs/versiones acotados evitan inyección en logs y cardinalidad ilimitada durante el proceso.
+- `PolicyId`, `Version` y `RouteId`: 1–64 caracteres ASCII, patrón `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; RouteId único con comparación ordinal y existente en el mismo conjunto de RouteConfig entregado a YARP (`protected-payment` o `passthrough` en esta demo). Una ruta inexistente impide Build/Start, nunca queda una política silenciosamente sin usar. `Mode` es obligatorio y acepta exclusivamente los textos exactos `Mask`, `Block` y `Observe`; números, distinta capitalización, espacios y vacío se rechazan. La gramática acota longitud y caracteres, no acredita ausencia semántica de secretos. Con reload, versiones sucesivas pueden acumular valores distintos del tag `gateway.policy.version` durante el proceso: no hay un límite global de cardinalidad entre publicaciones. Antes de añadir exporters debe definirse su tratamiento operativo.
 - Selector estructural acotado (no JSONPath completo): `$` seguido de 1 a 16 pasos, cada uno una propiedad `.[A-Za-z_][A-Za-z0-9_]{0,63}` o comodín de array `[*]` explícito; máximo total 1041 caracteres. Se conservan los límites operativos anteriores, contando cada comodín como un paso. Ejemplos: `$.payment.cardNumber`, `$.payments[*].cardNumber`, `$.cards[*]`, `$.groups[*][*].cardNumber` y `$[*].cardNumber` para array raíz. Sin índices, filtros, descenso recursivo, comodín de propiedades, comillas ni escapes. Comparación ordinal case-sensitive; se visitan todos los duplicados y todos los elementos de arrays seleccionados. Un paso de propiedad solo recorre objetos y `[*]` solo arrays: otro tipo antes del terminal no coincide y se conserva. Arrays vacíos no cambian. Terminal `null` pasa; string aplica Mask o Block según Mode; otro tipo terminal falla cerrado para toda la respuesta, sin publicar una transformación parcial. Se comprueba cancelación/deadline por elemento; no cambia la reserva ni concurrencia.
 - `CoverageContract` es obligatorio: `Version` usa el mismo formato seguro de identificadores y `Required` contiene entre 1 y 32 pares RouteId/Selector. Cada RouteId debe ser conocido; la unicidad es por par RouteId/Selector, permitiendo varios selectores de la misma ruta. Cada selector usa la gramática anterior y cada par debe coincidir **exactamente (ordinal, case-sensitive)** con la regla principal o una adicional de la política efectiva. Cambiar solo ruta o selector, omitir cobertura, duplicar pares o configurar un contrato inválido impide Build/Start. Es cobertura **mínima**, no necesariamente completa. La versión identifica el contrato; no debe coincidir necesariamente con la versión de cada política y la suministra el operador.
 - El contrato detecta desviaciones de las políticas respecto a una cobertura declarada, no descubre dónde existe PAN. **Cambiar conjuntamente política y contrato es un cambio de seguridad que requiere revisión** (y versionado explícito del contrato). No protege frente a quien controla ambos archivos/configuración o sus sobrescrituras: ese control está dentro del límite de confianza. El valor distribuido exige `protected-payment` + `$.payment.cardNumber`; migrar configuraciones anteriores requiere añadir explícitamente el contrato antes de iniciar esta versión.
 - `MaxBodyBytes`: entero obligatorio de 1 a **16.777.216** bytes inclusive. El techo operativo de 16 MiB acota el buffering por respuesta; no constituye un presupuesto global de memoria ni cambia el valor aprobado por defecto de 1 MiB.
-- Catálogo inmutable por RouteId y selectores segmentados una sola vez al iniciar. **Sin BD ni reload dinámico de políticas**: `IOptions`, no monitor/snapshot; cambiar archivo/configuración requiere reiniciar. Las fuentes estándar de configuración .NET pueden sobrescribir valores antes del arranque, sujetos a la misma validación. Las rutas YARP de esta demo siguen definidas en código; cambiar RouteId asigna una política a una ruta, no crea rutas nuevas. Rutas sin política son passthrough.
+- Cada catálogo es inmutable por RouteId y segmenta selectores al compilarse. **Sin BD**; por defecto se usa `IOptions`, no monitor/snapshot, y cambiar configuración requiere reiniciar. El opt-in `LocalPolicySnapshotFile` de MVP35 permite intercambiar catálogos completos dentro de sus restricciones fijas; no recarga proveedores ordinarios de configuración ni rutas YARP. Las fuentes estándar de configuración .NET pueden sobrescribir valores antes del arranque, sujetos a la misma validación. Las rutas YARP de esta demo siguen definidas en código; cambiar RouteId asigna una política a una ruta, no crea rutas nuevas. Rutas sin política son passthrough.
 
 ## RF07 Block (MVP-20, opt-in local)
 

@@ -13,8 +13,8 @@ public static class GatewayHost
         // Framework request logs can contain URLs/query strings. This slice emits only fixed events.
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole();
-        builder.Logging.AddFilter((category, level) => category == typeof(PanResponseTransform).FullName
-            && level >= LogLevel.Information);
+        builder.Logging.AddFilter((category, level) => (category == typeof(PanResponseTransform).FullName
+            || category == typeof(LocalPolicyReloadService).FullName) && level >= LogLevel.Information);
         configure?.Invoke(builder);
         upstream ??= builder.Configuration["Upstream"] ?? "http://127.0.0.1:5101/";
         if (!Uri.TryCreate(upstream, UriKind.Absolute, out var uri)
@@ -35,6 +35,14 @@ public static class GatewayHost
                 binder => binder.ErrorOnUnknownConfiguration = true)
             .ValidateOnStart();
         builder.Services.AddSingleton<PanPolicyCatalog>();
+        builder.Services.AddSingleton(services => new LocalPolicySnapshots(new LocalPolicySnapshot(
+            services.GetRequiredService<IOptions<PanPolicyOptions>>().Value, builder.Configuration)));
+        var localPolicyFile = builder.Configuration["LocalPolicySnapshotFile"];
+        if (localPolicyFile is not null)
+        {
+            builder.Services.AddSingleton(new LocalPolicyFileReader(localPolicyFile, routes));
+            builder.Services.AddHostedService<LocalPolicyReloadService>();
+        }
         builder.Services.AddSingleton<InspectionBudget>();
         builder.Services.AddOptions<ProxyAdmissionOptions>()
             .Bind(builder.Configuration.GetSection(ProxyAdmissionOptions.SectionName),
@@ -68,10 +76,12 @@ public static class GatewayHost
                         UpstreamHeadersEligibility.IsEligible(transform.HttpContext));
                     return ValueTask.CompletedTask;
                 });
-                var policy = context.Services.GetRequiredService<PanPolicyCatalog>().Find(context.Route.RouteId);
-                if (policy is null) return;
+                var snapshots = context.Services.GetRequiredService<LocalPolicySnapshots>();
+                if (!snapshots.IsProtected(context.Route.RouteId)) return;
                 context.AddRequestTransform(transform =>
                 {
+                    if (transform.HttpContext.Features.Get<LocalPolicyRequestCapture>()?.Policy.RouteId != context.Route.RouteId)
+                        throw new InvalidOperationException("Protected route policy capture is unavailable.");
                     transform.ProxyRequest.Headers.Remove("Accept-Encoding");
                     transform.ProxyRequest.Headers.TryAddWithoutValidation("Accept-Encoding", "identity");
                     transform.ProxyRequest.Headers.Remove("If-None-Match");
@@ -81,7 +91,13 @@ public static class GatewayHost
                     return ValueTask.CompletedTask;
                 });
                 context.AddResponseTransform(transform =>
-                    context.Services.GetRequiredService<PanResponseTransform>().ApplyAsync(transform, policy, context.Route.ClusterId));
+                {
+                    var capture = transform.HttpContext.Features.Get<LocalPolicyRequestCapture>();
+                    if (capture?.Policy.RouteId != context.Route.RouteId)
+                        throw new InvalidOperationException("Protected route policy capture is unavailable.");
+                    return context.Services.GetRequiredService<PanResponseTransform>()
+                        .ApplyAsync(transform, capture.Policy, context.Route.ClusterId);
+                });
             });
         builder.Services.AddSingleton<Yarp.ReverseProxy.Forwarder.IForwarderHttpClientFactory, UpstreamHeadersHttpClientFactory>();
         LoopbackListenerGuard.Register(builder.Services);
@@ -90,11 +106,25 @@ public static class GatewayHost
         {
             LoopbackListenerGuard.ValidateServer(app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>());
             app.UseRouting();
+            app.Use(async (context, next) =>
+            {
+                var route = context.GetEndpoint()?.Metadata.GetMetadata<Yarp.ReverseProxy.Model.RouteModel>();
+                var snapshots = context.RequestServices.GetRequiredService<LocalPolicySnapshots>();
+                if (route is not null && snapshots.IsProtected(route.Config.RouteId))
+                {
+                    var snapshot = snapshots.Active;
+                    var policy = snapshot.Catalog.Find(route.Config.RouteId);
+                    if (policy is null) { context.Response.StatusCode = 503; return; }
+                    context.Features.Set(new LocalPolicyRequestCapture(snapshot, policy));
+                }
+                await next(context);
+            });
             app.UseMiddleware<ProxyAdmissionMiddleware>();
             app.MapReverseProxy();
             app.MapGatewayDashboard(routes.Select(route => route.RouteId));
             // Resolve explicitly before publishing local readiness; invalid PAN configuration must fail startup.
             app.Services.GetRequiredService<PanPolicyCatalog>();
+            app.Services.GetRequiredService<LocalPolicySnapshots>();
             app.MapGatewayHealth();
             app.Services.GetRequiredService<ProxyAdmission>();
             app.Services.GetRequiredService<UpstreamHeadersDeadlineSettings>();

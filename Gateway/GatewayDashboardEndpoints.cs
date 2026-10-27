@@ -10,8 +10,9 @@ internal static class GatewayDashboardEndpoints
     internal static void MapGatewayDashboard(this WebApplication app, IEnumerable<string> routeIds)
     {
         var startedAtUtc = DateTimeOffset.UtcNow;
-        var catalog = app.Services.GetRequiredService<PanPolicyCatalog>();
-        var policies = routeIds.Select(catalog.Find).OfType<CompiledPanPolicy>()
+        var snapshots = app.Services.GetRequiredService<LocalPolicySnapshots>();
+        var fixedRouteIds = routeIds.ToImmutableArray();
+        ImmutableArray<DashboardPolicy> Policies(LocalPolicySnapshot snapshot) => fixedRouteIds.Select(snapshot.Catalog.Find).OfType<CompiledPanPolicy>()
             .Select(p => new DashboardPolicy(p.RouteId, p.PolicyId, p.Version, p.Mode, p.MaxBodyBytes)
             {
                 Transformation = p.Transformation,
@@ -50,7 +51,7 @@ internal static class GatewayDashboardEndpoints
                 var ready = lifetime.ApplicationStarted.IsCancellationRequested
                     && !lifetime.ApplicationStopping.IsCancellationRequested;
                 await context.Response.WriteAsJsonAsync(new DashboardSnapshot(1, startedAtUtc,
-                    new(true, ready), policies, telemetry.DashboardMetrics), context.RequestAborted);
+                    new(true, ready), Policies(snapshots.Active), telemetry.DashboardMetrics), context.RequestAborted);
                 return;
             }
             var resource = path switch

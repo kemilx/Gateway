@@ -144,7 +144,7 @@ public sealed record CompiledPanPolicy(string PolicyId, string Version, string R
 
 public sealed record CompiledSensitiveRule(ImmutableArray<string> Segments, string Transformation);
 
-// IOptions (not IOptionsMonitor/Snapshot): bind once, then copy into immutable process-lifetime data.
+// Each catalog binds once and remains immutable, including catalogs retained by in-flight requests.
 public sealed class PanPolicyCatalog
 {
     private readonly FrozenDictionary<string, CompiledPanPolicy> policies;
@@ -195,4 +195,5 @@ public sealed class PanPolicyCatalog
         typeof(PanPolicyOptions), ["Invalid AdditionalRules configuration shape."]);
 
     public CompiledPanPolicy? Find(string routeId) => policies.GetValueOrDefault(routeId);
+    internal IEnumerable<CompiledPanPolicy> Policies => policies.Values;
 }
