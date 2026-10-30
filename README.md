@@ -62,9 +62,12 @@ enviar uno. No es identidad de usuario, idempotencia, transacción ni garantía 
 de logs. No añade persistencia/exporter, modifica protección, políticas, admisión o
 deadlines, ni habilita uso con datos reales. Passthrough sigue sin proteger los datos.
 Para rollback, desactivar en ambos procesos y reiniciar; retirar la opción antes de
-volver a binarios previos. Sin migraciones. Esta sección no acredita RF11 completo,
-rendimiento aceptado, suite completa, revisión global, publicación ni despliegue MVP37;
-las cifras históricas de otros MVP más abajo no son validación de MVP37.
+volver a binarios previos. Sin migraciones. Validación local sintética final: build
+Release sin errores ni advertencias y suite completa **1424/1424 PASS**, cero omitidas.
+Las revisiones globales de código y seguridad quedaron aprobadas sin bloqueantes y el
+incremento se publicó en `cc44c025c1f2d033a88707975b0495a0a47cb84d`. Esto no acredita
+RF11 completo, rendimiento aceptado, despliegue ni uso con datos reales; las cifras
+históricas de otros MVP más abajo no son validación de MVP37.
 
 ### Estado de recarga de solo lectura (MVP-36)
 
