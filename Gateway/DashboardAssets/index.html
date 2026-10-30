@@ -30,6 +30,19 @@
         <article class="card"><h2>Preparación</h2><p id="ready" class="health-value">Sin datos</p><p>No garantiza privacidad, disponibilidad del upstream ni capacidad para nuevas inspecciones.</p></article>
         <article class="card"><h2>Inicio de la instancia</h2><p id="started-at" class="start-value">Sin datos</p><p>Los contadores se reinician al reiniciar la instancia.</p></article>
       </section>
+      <section class="section" aria-labelledby="recarga">
+        <div class="section-heading"><h2 id="recarga">Estado de recarga</h2></div>
+        <div class="card">
+          <p id="reload-status" class="health-value">Sin datos</p>
+          <p id="reload-rejection" hidden>La última política válida sigue activa</p>
+          <p id="reload-reason" hidden></p>
+          <div id="reload-dates">
+            <p><strong>Última comprobación:</strong> <span id="reload-checked-at">Sin datos</span></p>
+            <p><strong>Última activación:</strong> <span id="reload-applied-at">Sin datos</span></p>
+          </div>
+          <p>El estado de recarga no determina la disponibilidad ni garantiza privacidad</p>
+        </div>
+      </section>
       <section class="section" aria-labelledby="actividad">
         <div class="section-heading"><div><p class="eyebrow">En este momento</p><h2 id="actividad">Recursos y máscaras</h2></div></div>
         <div class="metrics-grid">

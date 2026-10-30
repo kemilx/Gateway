@@ -1,4 +1,4 @@
-# MVP-35 — Snapshots locales opt-in de políticas (RF12 limitado)
+# MVP-36 — Estado de recarga visible en el panel local
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,65 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Estado de recarga de solo lectura (MVP-36)
+
+El panel distingue la **última evaluación terminada de recarga** de la disponibilidad
+del gateway. Si una actualización se rechaza, muestra **«La última política válida
+sigue activa»**; ese rechazo no cambia readiness ni convierte la política vigente
+en una política inválida. No certifica que el archivo actual ya se haya leído,
+la frescura de la captura, privacidad ni disponibilidad del upstream.
+
+GET `/dashboard/api/summary` conserva `schemaVersion: 1` y añade únicamente
+`policyReload`, con estos cinco campos:
+
+```json
+{
+  "enabled": true,
+  "status": "rejected",
+  "reason": "invalid_configuration",
+  "lastCheckedAtUtc": "2026-10-29T12:00:00+00:00",
+  "lastAppliedAtUtc": "2026-10-29T11:59:00+00:00"
+}
+```
+
+- `disabled`: enabled false, motivo y ambas horas null; no se activa lector ni timer.
+- `valid`: enabled true, motivo null y ambas horas presentes; incluye evaluación
+  válida sin cambios, no solo una publicación nueva.
+- `rejected`: enabled true, ambas horas presentes y motivo exclusivamente
+  `read_failed`, `too_large`, `invalid_configuration` o `incompatible_snapshot`.
+  El panel usa traducciones constantes, nunca mensajes de excepción.
+- `lastCheckedAtUtc` se registra en cada intento terminado, incluso un rechazo
+  repetido suprimido en logs. `lastAppliedAtUtc` cambia solo con publicación efectiva,
+  incluida la inicial. Un rechazo o evaluación válida sin cambios conserva la última
+  activación. Cancelación antes de completar no registra un rechazo ni otra evaluación.
+
+Las horas proceden de TimeProvider en UTC y son **observacionales**: el reloj puede
+retroceder. No se deducen duraciones, orden monotónico ni SLA. El proveedor publica
+catálogo y estado juntos en una vista inmutable y el summary captura esa vista una
+vez; las métricas siguen siendo acumulados observacionales independientes.
+Solo se conserva el estado actual, sin historial, archivos, rutas, selectores,
+contenido, excepciones ni nueva configuración. No cambia el mecanismo de recarga
+opt-in ni sus restricciones Windows/disco local descritas en MVP35.
+
+La sección muestra «Recarga desactivada», «Última comprobación válida» o
+«Actualización rechazada», con horas de última comprobación y activación. No añade
+botones, edición, peticiones ni endpoints. Mantiene controles locales, CSP, métodos,
+demo aislada y eventos 4–7. En servidores anteriores sin `policyReload`, la UI indica
+«Estado de recarga no disponible en este servidor», no desactivada. Si el objeto está
+presente pero malformado, no renderiza parcialmente: conserva la captura anterior y
+muestra el aviso de actualización fallida existente. Los textos se insertan como
+texto, no como HTML; los motivos recibidos no se muestran libremente.
+
+Validación sintética local: build Release sin errores ni advertencias; focal
+**143/143 PASS**, solución **1340/1340 PASS**, cero omitidas, y Edge real **4/4 PASS**.
+Incluye rechazo/recuperación con archivo y YARP reales, coherencia de catálogo/horas
+durante cambios concurrentes, preservación de readiness, 22 objetos inválidos y legacy
+mediante intercepción CDP del summary, 320 px reales y offline/recuperación con demo
+persistente. Las pruebas distinguen IO real de fixtures del consumidor; no acreditan
+auditoría WCAG ni lector de pantalla exhaustivos. La recarga automática visible tiene
+además evidencia focal de frontend; la aceptación HTTP usa refresh manual del panel.
+Sin despliegue, datos reales, nuevo benchmark ni aprobación productiva.
 
 ### Snapshots locales completos (MVP-35)
 

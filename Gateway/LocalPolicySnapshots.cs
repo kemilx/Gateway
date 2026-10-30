@@ -38,23 +38,29 @@ internal sealed class LocalPolicySnapshot
             && pair.First.Segments.SequenceEqual(pair.Second.Segments));
 }
 
+internal sealed record LocalPolicyView(LocalPolicySnapshot Snapshot, DashboardPolicyReload Reload);
+
 internal sealed class LocalPolicySnapshots
 {
-    private LocalPolicySnapshot active;
+    private LocalPolicyView active;
     private readonly LocalPolicySnapshot baseline;
     private readonly FrozenSet<string> protectedRoutes;
     internal LocalPolicySnapshots(LocalPolicySnapshot baseline)
     {
-        active = this.baseline = baseline;
+        this.baseline = baseline;
+        active = new(baseline, new(false, "disabled", null, null, null));
         protectedRoutes = baseline.Routes.Select(p => p.Route).ToFrozenSet(StringComparer.Ordinal);
     }
-    internal LocalPolicySnapshot Active => Volatile.Read(ref active);
+    internal LocalPolicyView Capture() => Volatile.Read(ref active);
+    internal LocalPolicySnapshot Active => Capture().Snapshot;
     internal bool IsProtected(string routeId) => protectedRoutes.Contains(routeId);
 
     // Single writer: initialization followed by the sequential reload service.
-    internal bool Publish(LocalPolicySnapshot candidate, CancellationToken cancellationToken, bool initial = false)
+    internal bool Publish(LocalPolicySnapshot candidate, CancellationToken cancellationToken, bool initial = false,
+        DateTimeOffset? checkedAtUtc = null)
     {
-        var previous = Active;
+        var view = Capture();
+        var previous = view.Snapshot;
         if (!baseline.Compatible(candidate)) throw new LocalPolicyReadException("incompatible_snapshot");
         var changed = initial;
         foreach (var (route, _) in baseline.Routes)
@@ -67,8 +73,24 @@ internal sealed class LocalPolicySnapshots
             changed |= !same || before.Version != after.Version;
         }
         cancellationToken.ThrowIfCancellationRequested();
-        if (changed) Volatile.Write(ref active, candidate);
+        var snapshot = changed ? candidate : previous;
+        if (checkedAtUtc is { } checkedAt)
+        {
+            var utc = checkedAt.ToUniversalTime();
+            Volatile.Write(ref active, new(snapshot, new(true, "valid", null, utc,
+                changed ? utc : view.Reload.LastAppliedAtUtc)));
+        }
+        else if (changed) Volatile.Write(ref active, new(snapshot, view.Reload));
         return changed;
+    }
+
+    internal void RecordRejection(string reason, DateTimeOffset checkedAtUtc)
+    {
+        if (reason is not ("read_failed" or "too_large" or "invalid_configuration" or "incompatible_snapshot"))
+            throw new ArgumentOutOfRangeException(nameof(reason));
+        var view = Capture();
+        Volatile.Write(ref active, new(view.Snapshot, new(true, "rejected", reason,
+            checkedAtUtc.ToUniversalTime(), view.Reload.LastAppliedAtUtc)));
     }
 }
 

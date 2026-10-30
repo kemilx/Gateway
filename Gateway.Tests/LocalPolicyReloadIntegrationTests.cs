@@ -85,7 +85,7 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
         Assert.DoesNotContain("4111111111111111", text);
         Assert.DoesNotContain("private-policy-marker", text);
         var root = JsonNode.Parse(text)!.AsObject();
-        Assert.Equal(new[] { "health", "metrics", "policies", "schemaVersion", "startedAtUtc" }, root.Select(p => p.Key).Order());
+        Assert.Equal(new[] { "health", "metrics", "policies", "policyReload", "schemaVersion", "startedAtUtc" }, root.Select(p => p.Key).Order());
         Assert.True(root["health"]!["ready"]!.GetValue<bool>());
         var p = Assert.Single(root["policies"]!.AsArray())!;
         Assert.Equal(mode, p["mode"]!.GetValue<string>());
@@ -157,6 +157,11 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
             await logs.Wait(l => l.Any(e => e.Id == 7 && e.Field("Reason") == "invalid_configuration"));
             Assert.Same(b, store.Active);
             var rejected = await Summary(client, "Block", "v2");
+            Assert.True(rejected["policyReload"]!["enabled"]!.GetValue<bool>());
+            Assert.Equal("rejected", rejected["policyReload"]!["status"]!.GetValue<string>());
+            Assert.Equal("invalid_configuration", rejected["policyReload"]!["reason"]!.GetValue<string>());
+            Assert.NotNull(rejected["policyReload"]!["lastCheckedAtUtc"]);
+            Assert.NotNull(rejected["policyReload"]!["lastAppliedAtUtc"]);
             Assert.Equal(initial["startedAtUtc"]!.ToJsonString(), rejected["startedAtUtc"]!.ToJsonString());
             Assert.Equal(1, rejected["metrics"]!["outcomes"]!["inspected"]!.GetValue<int>());
             Assert.Equal(1, rejected["metrics"]!["outcomes"]!["policy_blocked"]!.GetValue<int>());
@@ -171,6 +176,8 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
             Assert.Equal("excluded_media_type", exclusion.Field("Reason"));
             Assert.Equal("not_evaluated", exclusion.Field("RuleEvaluation"));
             var final = await Summary(client, "Mask", "v3");
+            Assert.Equal("valid", final["policyReload"]!["status"]!.GetValue<string>());
+            Assert.Null(final["policyReload"]!["reason"]);
             Assert.Equal(2, final["metrics"]!["outcomes"]!["inspected"]!.GetValue<int>());
             Assert.Equal(2, final["metrics"]!["outcomes"]!["policy_blocked"]!.GetValue<int>());
             Assert.Equal(2, final["metrics"]!["validatedMasks"]!.GetValue<int>());
@@ -423,6 +430,7 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
             await service.StartAsync(default); // Initial snapshot actually reads the real validated file.
             var timer = await clock.Next();
             var before = store.Active;
+            var beforeView = store.Capture();
             await Replace(Document("Block", "v2"));
             timer.Fire();
             var readToken = await pending.Entered.Task.WaitAsync(Limit);
@@ -446,6 +454,7 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
             Assert.Equal(1, pending.ReadCalls);
             Assert.True(pending.WasDisposed);
             Assert.True(service.ExecuteTask.IsCompletedSuccessfully);
+            Assert.Same(beforeView, store.Capture());
             Assert.Same(before, store.Active);
             Assert.Single(logs.All, e => e.Id == 7 && e.Field("Status") == "applied");
             Assert.DoesNotContain(logs.All, e => e.Field("Status") == "rejected");
@@ -538,6 +547,7 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
     [Fact]
     public async Task Concurrent_summaries_and_requests_never_mix_policy_versions()
     {
+        var initialTime = new DateTimeOffset(2026, 10, 29, 12, 0, 0, TimeSpan.Zero);
         await Replace(Document());
         var entered = Channel.CreateUnbounded<bool>();
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -549,7 +559,7 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
             await c.Response.WriteAsync(Payload);
         });
         await upstream.StartAsync();
-        var clock = new Clock();
+        var clock = new Clock { Now = initialTime };
         var logs = new Logs();
         await using var gateway = GatewayApp(Address(upstream) + "/", logs, clock);
         await gateway.StartAsync();
@@ -560,6 +570,7 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
         {
             for (var i = 0; i < 3; i++) await entered.Reader.ReadAsync().AsTask().WaitAsync(Limit);
             await Replace(Document("Block", "v2"));
+            clock.Now = initialTime.AddSeconds(1);
             timer.Fire();
             await clock.Next();
             // 100 simultaneous readers; dashboard has a deliberate four-request admission cap.
@@ -572,6 +583,8 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
                 var p = Assert.Single(d["policies"]!.AsArray())!;
                 Assert.Equal("Block", p["mode"]!.GetValue<string>());
                 Assert.Equal("v2", p["version"]!.GetValue<string>());
+                Assert.Equal("valid", d["policyReload"]!["status"]!.GetValue<string>());
+                Assert.Equal(initialTime.AddSeconds(1), d["policyReload"]!["lastAppliedAtUtc"]!.GetValue<DateTimeOffset>());
                 return true;
             }).ToArray();
             Assert.Contains(true, await Task.WhenAll(readers));
@@ -587,21 +600,32 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
             // independently specified mode/limit metadata, so mixed projections cannot pass.
             var service = gateway.Services.GetServices<IHostedService>().OfType<LocalPolicyReloadService>().Single();
             var expected = new Dictionary<string, (string Mode, int Bytes)> { ["v2"] = ("Block", 1048576) };
+            var appliedTimes = new Dictionary<string, DateTimeOffset> { ["v2"] = initialTime.AddSeconds(1) };
             for (var i = 0; i < 100; i++)
             {
                 var version = "stress-" + i;
                 var mode = i % 2 == 0 ? "Mask" : "Block";
                 var bytes = 2048 + i;
                 expected.Add(version, (mode, bytes));
+                clock.Now = initialTime.AddSeconds(i + 2);
+                appliedTimes.Add(version, clock.Now.Value);
                 var d = Document(mode, version);
                 Policy(d)["MaxBodyBytes"] = bytes;
                 await Replace(d);
                 var read = client.GetStringAsync(SummaryPath);
                 await Task.WhenAll(read, service.ReloadAsync(default));
-                var policy = JsonNode.Parse(await read)!["policies"]![0]!;
+                var summary = JsonNode.Parse(await read)!;
+                var policy = summary["policies"]![0]!;
                 var tuple = expected[policy["version"]!.GetValue<string>()];
                 Assert.Equal(tuple.Mode, policy["mode"]!.GetValue<string>());
                 Assert.Equal(tuple.Bytes, policy["maxBodyBytes"]!.GetValue<int>());
+                var reload = summary["policyReload"]!;
+                Assert.True(reload["enabled"]!.GetValue<bool>());
+                Assert.Equal("valid", reload["status"]!.GetValue<string>());
+                Assert.Null(reload["reason"]);
+                var appliedAt = appliedTimes[policy["version"]!.GetValue<string>()];
+                Assert.Equal(appliedAt, reload["lastAppliedAtUtc"]!.GetValue<DateTimeOffset>());
+                Assert.Equal(appliedAt, reload["lastCheckedAtUtc"]!.GetValue<DateTimeOffset>());
             }
             await Summary(client, "Block", "stress-99");
         }
@@ -704,6 +728,8 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
     }
     private sealed class Clock : TimeProvider
     {
+        internal DateTimeOffset? Now;
+        public override DateTimeOffset GetUtcNow() => Now ?? base.GetUtcNow();
         private readonly Channel<Timer> timers = Channel.CreateUnbounded<Timer>();
         internal int Count;
         internal async Task<Timer> Next() => await timers.Reader.ReadAsync().AsTask().WaitAsync(Limit);

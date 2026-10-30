@@ -10,7 +10,7 @@ internal sealed class LocalPolicyReloadService(LocalPolicyFileReader reader, Loc
         try
         {
             var initial = await reader.ReadAsync(cancellationToken);
-            snapshots.Publish(initial, cancellationToken, initial: true);
+            snapshots.Publish(initial, cancellationToken, initial: true, checkedAtUtc: timeProvider.GetUtcNow());
             Notify("applied", "none");
         }
         catch (LocalPolicyReadException)
@@ -36,13 +36,14 @@ internal sealed class LocalPolicyReloadService(LocalPolicyFileReader reader, Loc
         try
         {
             var candidate = await reader.ReadAsync(cancellationToken);
-            var published = snapshots.Publish(candidate, cancellationToken);
+            var published = snapshots.Publish(candidate, cancellationToken, checkedAtUtc: timeProvider.GetUtcNow());
             lastRejectedReason = null; // valid, including unchanged, resets suppression silently
             if (published) Notify("applied", "none");
         }
         catch (LocalPolicyReadException e)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            snapshots.RecordRejection(e.Reason, timeProvider.GetUtcNow());
             if (lastRejectedReason == e.Reason) return;
             lastRejectedReason = e.Reason;
             Notify("rejected", e.Reason);

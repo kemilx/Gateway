@@ -14,6 +14,12 @@
     ["timed_out", "Tiempo agotado"],
     ["policy_blocked", "Bloqueadas por política"]
   ];
+  const reloadReasons = {
+    read_failed: "No se pudo leer el archivo de políticas.",
+    too_large: "La actualización supera el tamaño permitido.",
+    invalid_configuration: "La actualización no es válida.",
+    incompatible_snapshot: "La actualización no cumple las restricciones de la instancia."
+  };
   let inFlight = null;
   let pollTimer = null;
   let lastReceived = null;
@@ -23,6 +29,25 @@
   const count = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value);
   const text = (value) => typeof value === "string" || count(value);
   const validDate = (value) => typeof value === "string" && Number.isFinite(Date.parse(value));
+
+  function validUtcDate(value) {
+    return typeof value === "string"
+      && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|\+00:00)$/.test(value)
+      && validDate(value) && new Date(value).toISOString().slice(0, 19) === value.slice(0, 19);
+  }
+
+  function validReload(data) {
+    if (!Object.hasOwn(data, "policyReload")) return true;
+    const r = data.policyReload;
+    if (!r || typeof r !== "object" || Array.isArray(r)) return false;
+    if (r.enabled === false) {
+      return r.status === "disabled" && r.reason === null
+        && r.lastCheckedAtUtc === null && r.lastAppliedAtUtc === null;
+    }
+    return r.enabled === true && validUtcDate(r.lastCheckedAtUtc) && validUtcDate(r.lastAppliedAtUtc)
+      && ((r.status === "valid" && r.reason === null)
+        || (r.status === "rejected" && typeof r.reason === "string" && Object.hasOwn(reloadReasons, r.reason)));
+  }
 
   function validRules(p) {
     const hasCount = Object.hasOwn(p, "ruleCount");
@@ -37,7 +62,7 @@
 
   function validate(data) {
     const m = data?.metrics;
-    return data?.schemaVersion === 1 && validDate(data.startedAtUtc)
+    return data?.schemaVersion === 1 && validDate(data.startedAtUtc) && validReload(data)
       && typeof data.health?.live === "boolean" && typeof data.health?.ready === "boolean"
       && Array.isArray(data.policies) && data.policies.every((p) => p &&
         typeof p.routeId === "string" && typeof p.policyId === "string" && text(p.version)
@@ -66,6 +91,7 @@
       byId(id).className = `health-value ${healthy ? "healthy" : "unhealthy"}`;
     }
     setText("started-at", date.format(new Date(data.startedAtUtc)));
+    renderReload(data);
     setText("active", number.format(m.activeInspections));
     setText("reserved", `${number.format(m.reservedBodyBytes)} B`);
     setText("masks", number.format(m.validatedMasks));
@@ -102,6 +128,23 @@
       rows.push(row);
     }
     byId("policies").replaceChildren(...rows);
+  }
+
+  function renderReload(data) {
+    const available = Object.hasOwn(data, "policyReload");
+    const r = data.policyReload;
+    const rejected = available && r.status === "rejected";
+    setText("reload-status", !available ? "Estado de recarga no disponible en este servidor"
+      : r.status === "disabled" ? "Recarga desactivada"
+        : rejected ? "Actualización rechazada" : "Última comprobación válida");
+    byId("reload-dates").hidden = !available;
+    setText("reload-checked-at", available && r.lastCheckedAtUtc !== null
+      ? date.format(new Date(r.lastCheckedAtUtc)) : "Sin comprobaciones");
+    setText("reload-applied-at", available && r.lastAppliedAtUtc !== null
+      ? date.format(new Date(r.lastAppliedAtUtc)) : "Sin activaciones por recarga");
+    byId("reload-rejection").hidden = !rejected;
+    byId("reload-reason").hidden = !rejected;
+    setText("reload-reason", rejected ? reloadReasons[r.reason] : "");
   }
 
   function schedule() {

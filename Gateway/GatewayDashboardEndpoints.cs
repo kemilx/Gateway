@@ -50,8 +50,10 @@ internal static class GatewayDashboardEndpoints
                 if (HttpMethods.IsHead(context.Request.Method)) return;
                 var ready = lifetime.ApplicationStarted.IsCancellationRequested
                     && !lifetime.ApplicationStopping.IsCancellationRequested;
+                var view = snapshots.Capture();
                 await context.Response.WriteAsJsonAsync(new DashboardSnapshot(1, startedAtUtc,
-                    new(true, ready), Policies(snapshots.Active), telemetry.DashboardMetrics), context.RequestAborted);
+                    new(true, ready), Policies(view.Snapshot), telemetry.DashboardMetrics)
+                    { PolicyReload = view.Reload }, context.RequestAborted);
                 return;
             }
             var resource = path switch

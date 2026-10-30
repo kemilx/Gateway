@@ -59,7 +59,13 @@ public sealed class DashboardTests
         var text = await response.Content.ReadAsStringAsync();
         using var document = JsonDocument.Parse(text);
         var root = document.RootElement;
-        Keys(root, "schemaVersion", "startedAtUtc", "health", "policies", "metrics");
+        Keys(root, "schemaVersion", "startedAtUtc", "health", "policies", "metrics", "policyReload");
+        var reload = root.GetProperty("policyReload");
+        Keys(reload, "enabled", "status", "reason", "lastCheckedAtUtc", "lastAppliedAtUtc");
+        Assert.False(reload.GetProperty("enabled").GetBoolean());
+        Assert.Equal("disabled", reload.GetProperty("status").GetString());
+        foreach (var name in new[] { "reason", "lastCheckedAtUtc", "lastAppliedAtUtc" })
+            Assert.Equal(JsonValueKind.Null, reload.GetProperty(name).ValueKind);
         Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
         Assert.InRange(root.GetProperty("startedAtUtc").GetDateTimeOffset(), before, DateTimeOffset.UtcNow);
         Keys(root.GetProperty("health"), "live", "ready");

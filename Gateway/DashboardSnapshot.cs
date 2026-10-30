@@ -5,7 +5,12 @@ namespace Gateway;
 
 /// <summary>Redacted instance-local dashboard summary; gauges are observational, not atomic with totals.</summary>
 internal sealed record DashboardSnapshot(int SchemaVersion, DateTimeOffset StartedAtUtc,
-    DashboardHealth Health, ImmutableArray<DashboardPolicy> Policies, DashboardMetrics Metrics);
+    DashboardHealth Health, ImmutableArray<DashboardPolicy> Policies, DashboardMetrics Metrics)
+{
+    public DashboardPolicyReload PolicyReload { get; init; } = new(false, "disabled", null, null, null);
+}
+internal sealed record DashboardPolicyReload(bool Enabled, string Status, string? Reason,
+    DateTimeOffset? LastCheckedAtUtc, DateTimeOffset? LastAppliedAtUtc);
 /// <summary>Local pipeline health, independent of upstream availability and capacity.</summary>
 internal sealed record DashboardHealth(bool Live, bool Ready);
 /// <summary>Allowlisted immutable policy metadata, without selectors or topology.</summary>
