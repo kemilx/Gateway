@@ -1,4 +1,4 @@
-# MVP-38 — Exportación OTLP local sintética opt-in
+# MVP-39 — Observabilidad local sintética
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,59 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Dashboard local sintético (MVP-39)
+
+En Windows, con Node >=20 y npm/npx disponibles, abrir una terminal desde la raíz:
+
+```powershell
+powershell -NoProfile -File scripts/observability/Start-LocalObservability.ps1
+```
+
+El primer inicio descarga `@microsoft/aspire-cli@13.6.4` y su dashboard; no instala
+globalmente ni usa Docker. npm usa configuración de usuario y global vacías propias,
+registro oficial y scripts de instalación desactivados; no modifica las opciones npm
+del usuario. Abrir el enlace de login que muestra la terminal sin
+copiarlo a logs o evidencia: contiene un BrowserToken efímero. La API de consulta
+exige autenticación; el receptor OTLP no autentica y escucha solo en loopback. No
+permitir que otros usuarios o procesos no confiables accedan al equipo durante la
+sesión. Si 18888, 4317 o 4318 está ocupado, liberar el puerto por medios propios;
+el launcher no termina procesos ajenos. No usar con datos reales ni en producción.
+
+En otras dos terminales ejecutar los comandos opt-in de MVP-38 de abajo y solicitar
+`curl.exe http://127.0.0.1:5100/protected/payment`. En **Structured logs**, buscar
+un evento del Gateway, copiar su atributo `CorrelationId` y buscar ese mismo valor
+para localizar el evento de TestApi. Es correlación técnica, no una traza W3C.
+En **Metrics**, seleccionar el recurso Gateway y el meter `Gateway.Privacy`; los
+nueve instrumentos disponibles dependen de que se hayan producido sus eventos y
+del intervalo de exportación de cinco segundos. Passthrough no genera eventos de
+inspección Gateway y devuelve el original sintético, no una respuesta protegida.
+
+Detener hosts y dashboard con Ctrl+C en sus respectivas terminales. Comprobar después
+`Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object LocalPort -in 18888,4317,4318`
+y, si queda algún listener, identificar su propietario y detener solo procesos cuya
+pertenencia a esta sesión se haya comprobado; no matar procesos por nombre. El cierre
+de la terminal no garantiza por sí solo que todos los descendientes hayan terminado.
+`None` usa una
+base SQLite temporal, no garantiza ausencia de escritura en disco. La sesión nueva
+no pretende reabrir la anterior. Un cierre forzado puede dejar base y archivos WAL;
+solo tras detener los procesos propios, eliminar si se desea el directorio dedicado
+`$env:LOCALAPPDATA\Temp\opencode\MVP39-local-observability-runtime`. También
+contiene cachés y logs del CLI: tratarlos como sensibles y no compartirlos. No borrar
+directorios temporales generales ni procesos de otros usuarios.
+
+Los límites configurados son 1000 logs, 100 trazas, 1000 puntos métricos por
+dimensión, 10 recursos, 32 atributos y longitud 256. No son TTL ni límite global
+de bytes; los datos viejos pueden expulsarse, atributos truncarse y recursos nuevos
+rechazarse. La disponibilidad, entrega y retención no están garantizadas. QA local
+final sobre el launcher aislado: **8/8 PASS**, con consulta autenticada, correlación
+y privacidad de logs, respuestas protected/passthrough, nueve instrumentos con
+puntos almacenados, expulsión al límite de 1000 logs, reinicio sin logs/recursos/
+puntos métricos y navegación real en Edge por logs y métricas. El instrumento
+secundario se generó reiniciando Gateway con configuración sintética opt-in; no se
+observaron los nueve desde una sola instancia. No se probó dinámicamente la
+efectividad de los otros límites ni Ctrl+C ordinario. Revisión independiente final
+aprobada exclusivamente para uso local sintético; sin despliegue.
 
 ### Exportación OTLP sintética (MVP-38)
 
