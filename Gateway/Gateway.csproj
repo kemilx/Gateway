@@ -8,6 +8,9 @@
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="../SyntheticTelemetry/SyntheticTelemetry.csproj" />
+  </ItemGroup>
+  <ItemGroup>
     <EmbeddedResource Include="DashboardAssets/*" />
     <InternalsVisibleTo Include="Gateway.Tests" />
     <InternalsVisibleTo Include="Gateway.LoadHarness" />

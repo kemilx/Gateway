@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using SyntheticTelemetry;
 using Yarp.ReverseProxy.Configuration;
 using Yarp.ReverseProxy.Transforms;
 
@@ -16,6 +17,7 @@ public static class GatewayHost
         builder.Logging.AddFilter((category, level) => (category == typeof(PanResponseTransform).FullName
             || category == typeof(LocalPolicyReloadService).FullName) && level >= LogLevel.Information);
         configure?.Invoke(builder);
+        SyntheticOtlpRegistration.Add(builder.Services, builder.Logging, builder.Configuration, SyntheticOtlpRole.Gateway);
         upstream ??= builder.Configuration["Upstream"] ?? "http://127.0.0.1:5101/";
         if (!Uri.TryCreate(upstream, UriKind.Absolute, out var uri)
             || uri.Scheme != "http" || !uri.IsLoopback || !string.IsNullOrEmpty(uri.UserInfo)
@@ -153,6 +155,7 @@ public static class GatewayHost
             app.Services.GetRequiredService<InspectionBudget>();
             // Create process-lifetime instruments and their budget-backed observable callbacks.
             app.Services.GetRequiredService<PrivacyTelemetry>();
+            SyntheticOtlpRegistration.Start(app.Services);
         }
         catch
         {

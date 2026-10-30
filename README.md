@@ -1,4 +1,4 @@
-# MVP-37 — Correlación técnica local opt-in
+# MVP-38 — Exportación OTLP local sintética opt-in
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,36 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Exportación OTLP sintética (MVP-38)
+
+Desactivada por defecto e independiente en ambos procesos. Para enviar únicamente
+las métricas y eventos sanitizados existentes a un receptor local OTLP HTTP/protobuf:
+
+```powershell
+dotnet run --project TestApi -- --urls http://127.0.0.1:5101 --TechnicalCorrelation:Enabled true --SyntheticOtlp:Enabled true --SyntheticOtlp:Endpoint http://127.0.0.1:4318/
+dotnet run --project Gateway -- --urls http://127.0.0.1:5100 --TechnicalCorrelation:Enabled true --SyntheticOtlp:Enabled true --SyntheticOtlp:Endpoint http://127.0.0.1:4318/
+```
+
+`Endpoint` solo acepta `http` con IP literal canónica `127.0.0.1` o `::1`, puerto
+explícito y raíz `/`; las rutas fijas son `/v1/metrics` y `/v1/logs`. Rechaza DNS,
+userinfo, query, fragment, redirects y proxy. La configuración se congela al arranque;
+claves desconocidas o un endpoint inválido impiden servir. Desactivado no crea
+providers, readers, colas, workers ni tráfico OTLP.
+
+Gateway exporta exclusivamente los nueve instrumentos actuales de `Gateway.Privacy`
+y los eventos 4/5/6 de `Gateway.PanResponseTransform`; TestApi solo EventId 1
+`TechnicalCorrelationObserved`. No exporta logs framework, trazas, scopes, Activity,
+baggage, excepciones, cuerpos, PAN, URLs/query, headers ni atributos ambientales. El
+recurso contiene únicamente `service.name` fijo. La correlación nunca es tag métrico.
+
+La cola de logs es acotada (256, lotes de 64, espera 1 s); export y métricas usan
+timeouts de 2 s, intervalo métrico de 5 s y apagado best-effort. Collector caído,
+lento o con error no cambia HTTP, inspección, admisión ni readiness; pueden perderse
+o duplicarse datos. HTTP loopback no autentica al proceso collector: este alcance es
+solo local y sintético, sin TLS, credenciales, retención, backend remoto, producción,
+datos reales ni garantía de entrega. Para rollback, desactivar `SyntheticOtlp` y
+reiniciar; retirar la sección antes de volver a binarios previos. Sin migraciones.
 
 ### Correlación técnica sintética (MVP-37)
 

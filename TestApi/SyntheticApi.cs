@@ -1,4 +1,5 @@
 using System.Text;
+using SyntheticTelemetry;
 
 namespace TestApi;
 
@@ -13,6 +14,7 @@ public static class SyntheticApi
         var builder = WebApplication.CreateBuilder(args);
         builder.Logging.ClearProviders();
         configure?.Invoke(builder);
+        SyntheticOtlpRegistration.Add(builder.Services, builder.Logging, builder.Configuration, SyntheticOtlpRole.TestApi);
         var correlationEnabled = builder.Configuration.GetValue<bool>("TechnicalCorrelation:Enabled");
         if (correlationEnabled)
         {
@@ -28,6 +30,7 @@ public static class SyntheticApi
             });
         }
         var app = builder.Build();
+        SyntheticOtlpRegistration.Start(app.Services);
         if (correlationEnabled)
         {
             var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(SyntheticApi).FullName!);

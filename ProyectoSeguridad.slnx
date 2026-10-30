@@ -2,5 +2,6 @@
   <Project Path="Gateway.LoadHarness/Gateway.LoadHarness.csproj" />
   <Project Path="Gateway.Tests/Gateway.Tests.csproj" />
   <Project Path="Gateway/Gateway.csproj" />
+  <Project Path="SyntheticTelemetry/SyntheticTelemetry.csproj" />
   <Project Path="TestApi/TestApi.csproj" />
 </Solution>
