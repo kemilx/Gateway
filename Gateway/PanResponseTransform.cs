@@ -40,6 +40,7 @@ public sealed class PanResponseTransform
 
     internal async ValueTask ApplyAsync(ResponseTransformContext context, CompiledPanPolicy policy, string? serviceId)
     {
+        var correlationId = context.HttpContext.Features.Get<TechnicalCorrelationCapture>()?.Id;
         var response = context.HttpContext.Response;
         response.Headers.CacheControl = "no-store";
         var upstream = context.ProxyResponse;
@@ -48,14 +49,14 @@ public sealed class PanResponseTransform
         {
             context.SuppressResponseBody = true;
             RecordExclusion(policy, serviceId, HttpMethods.IsHead(context.HttpContext.Request.Method)
-                ? "excluded_head" : "excluded_bodyless");
+                ? "excluded_head" : "excluded_bodyless", correlationId);
             return;
         }
         var content = upstream.Content;
         if (!MediaTypeHeaderValue.TryParse(content.Headers.ContentType?.ToString(), out var media)
             || !string.Equals(media.MediaType, "application/json", StringComparison.OrdinalIgnoreCase))
         {
-            RecordExclusion(policy, serviceId, "excluded_media_type");
+            RecordExclusion(policy, serviceId, "excluded_media_type", correlationId);
             return;
         }
 
@@ -63,7 +64,7 @@ public sealed class PanResponseTransform
         context.SuppressResponseBody = true;
         context.CancellationToken.ThrowIfCancellationRequested();
         using var inspection = telemetry.TryStartInspection(policy, clock,
-            summary => RecordInspectionCompleted(policy, serviceId, summary));
+            summary => RecordInspectionCompleted(policy, serviceId, summary, correlationId));
         if (inspection is null)
         {
             context.CancellationToken.ThrowIfCancellationRequested();
@@ -223,10 +224,14 @@ public sealed class PanResponseTransform
     }
 
     internal void RecordInspectionCompleted(CompiledPanPolicy policy, string? serviceId, PrivacyTelemetry.InspectionSummary summary)
+        => RecordInspectionCompleted(policy, serviceId, summary, null);
+
+    internal void RecordInspectionCompleted(CompiledPanPolicy policy, string? serviceId,
+        PrivacyTelemetry.InspectionSummary summary, string? correlationId)
     {
         if (!IsSafeIdentifier(policy.RouteId) || !IsSafeIdentifier(policy.PolicyId)
             || !IsSafeIdentifier(policy.Version)) return;
-        string? correlation = null;
+        string? correlation = correlationId;
         try
         {
             if (logger.IsEnabled(LogLevel.Information))
@@ -284,7 +289,7 @@ public sealed class PanResponseTransform
 
     private static readonly ImmutableArray<string> AdditionalRuleIds = ["additional-0", "additional-1", "additional-2", "additional-3", "additional-4", "additional-5", "additional-6", "additional-7", "additional-8", "additional-9", "additional-10", "additional-11", "additional-12", "additional-13", "additional-14"];
 
-    private void RecordExclusion(CompiledPanPolicy policy, string? serviceId, string reason)
+    private void RecordExclusion(CompiledPanPolicy policy, string? serviceId, string reason, string? correlationId)
     {
         // Independent synchronous publications; never retry or log consumer failures.
         telemetry.RecordExclusion(policy, reason);
@@ -297,7 +302,7 @@ public sealed class PanResponseTransform
             if (!IsSafeIdentifier(policy.RouteId) || !IsSafeIdentifier(policy.PolicyId)
                 || !IsSafeIdentifier(policy.Version)) return;
             var service = IsSafeIdentifier(serviceId) ? serviceId! : "unknown";
-            var correlation = Guid.NewGuid().ToString("N");
+            var correlation = correlationId ?? Guid.NewGuid().ToString("N");
             logger.LogInformation(new EventId(4, "PrivacyExcluded"),
                 "Privacy excluded; schema {SchemaVersion} route {RouteId} service {ServiceId} policy {PolicyId} version {PolicyVersion} reason {Reason} rule evaluation {RuleEvaluation} correlation {CorrelationId}.",
                 1, policy.RouteId, service, policy.PolicyId, policy.Version, reason, "not_evaluated", correlation);

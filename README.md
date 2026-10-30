@@ -1,4 +1,4 @@
-# MVP-36 — Estado de recarga visible en el panel local
+# MVP-37 — Correlación técnica local opt-in
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -26,6 +26,45 @@ curl.exe http://127.0.0.1:5100/protected/payment
 El origen se configura con `--Upstream http://127.0.0.1:5101/` en Gateway; este slice solo acepta orígenes HTTP loopback. `/passthrough/payment` es **explícitamente no protegida**, demuestra el original sintético y no debe exponerse con datos reales. La API directa también devuelve el original.
 
 ## Contrato de configuración y arranque
+
+### Correlación técnica sintética (MVP-37)
+
+Desactivada por defecto en **ambos procesos**: `TechnicalCorrelation:Enabled=false`.
+Para observar una demostración exclusivamente local con datos sintéticos, reiniciar
+ambos procesos con opt-in explícito (sin modificar appsettings):
+
+```powershell
+dotnet run --project TestApi -- --urls http://127.0.0.1:5101 --TechnicalCorrelation:Enabled true
+dotnet run --project Gateway -- --urls http://127.0.0.1:5100 --TechnicalCorrelation:Enabled true
+```
+
+La opción se captura al arranque; no hay reload. Gateway genera un GUID N lowercase
+de 32 caracteres por solicitud proxy, en protected y passthrough, y reemplaza todos
+los valores de `X-Gateway-Correlation-Id` enviados por el cliente. Dashboard y health
+quedan fuera. Activado, elimina hacia upstream `traceparent`, `tracestate`, `baggage`,
+`Request-Id` y `Correlation-Context` e impide su reinyección automática en el transporte.
+No modifica Activity.Current ni crea spans/scopes de correlación.
+
+TestApi solo observa un valor lowercase hex32 no cero, sin trim ni normalización.
+Emite categoría `TestApi.SyntheticApi`, EventId 1 `TechnicalCorrelationObserved`, con
+plantilla fija `Synthetic request received; correlation {CorrelationId}.`, sin URL,
+query, cuerpos, excepciones, headers adicionales ni framework request logs. Los fallos
+ordinarios de IsEnabled/publicación se aíslan del resultado HTTP; los providers externos
+pueden enriquecer o perder logs y quedan fuera de la garantía del productor.
+
+Los eventos existentes 4/5 y sus 6 del gateway comparten esa identidad con la API,
+sin cambiar schema1 ni inventar eventos en passthrough. Sin feature, conservan su
+fallback local anterior. No se retorna el header reservado al cliente, tampoco como
+trailer; la API no lo refleja. Desactivado se conserva el comportamiento anterior.
+
+Un ID válido **no autentica procedencia**: alguien que acceda a la API directa puede
+enviar uno. No es identidad de usuario, idempotencia, transacción ni garantía de entrega
+de logs. No añade persistencia/exporter, modifica protección, políticas, admisión o
+deadlines, ni habilita uso con datos reales. Passthrough sigue sin proteger los datos.
+Para rollback, desactivar en ambos procesos y reiniciar; retirar la opción antes de
+volver a binarios previos. Sin migraciones. Esta sección no acredita RF11 completo,
+rendimiento aceptado, suite completa, revisión global, publicación ni despliegue MVP37;
+las cifras históricas de otros MVP más abajo no son validación de MVP37.
 
 ### Estado de recarga de solo lectura (MVP-36)
 

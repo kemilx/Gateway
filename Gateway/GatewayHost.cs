@@ -58,6 +58,11 @@ public static class GatewayHost
                 "TimeoutSeconds must be between 1 and 120 when present.")
             .ValidateOnStart();
         builder.Services.AddSingleton<UpstreamHeadersDeadlineSettings>();
+        builder.Services.AddOptions<TechnicalCorrelationOptions>()
+            .Bind(builder.Configuration.GetSection(TechnicalCorrelationOptions.SectionName),
+                binder => binder.ErrorOnUnknownConfiguration = true)
+            .ValidateOnStart();
+        builder.Services.AddSingleton<TechnicalCorrelationSettings>();
         Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<TimeProvider>(builder.Services, TimeProvider.System);
         builder.Services.AddSingleton<PrivacyTelemetry>();
         builder.Services.AddSingleton<DashboardBudget>();
@@ -74,8 +79,12 @@ public static class GatewayHost
                 {
                     transform.ProxyRequest.Options.Set(UpstreamHeadersEligibility.Key,
                         UpstreamHeadersEligibility.IsEligible(transform.HttpContext));
+                    if (transform.HttpContext.Features.Get<TechnicalCorrelationCapture>() is { } correlation)
+                        TechnicalCorrelationHeaders.Apply(transform.ProxyRequest, correlation);
                     return ValueTask.CompletedTask;
                 });
+                if (context.Services.GetRequiredService<TechnicalCorrelationSettings>().Enabled)
+                    context.AddResponseTrailerRemove(TechnicalCorrelationHeaders.Name, ResponseCondition.Always);
                 var snapshots = context.Services.GetRequiredService<LocalPolicySnapshots>();
                 if (!snapshots.IsProtected(context.Route.RouteId)) return;
                 context.AddRequestTransform(transform =>
@@ -109,6 +118,17 @@ public static class GatewayHost
             app.Use(async (context, next) =>
             {
                 var route = context.GetEndpoint()?.Metadata.GetMetadata<Yarp.ReverseProxy.Model.RouteModel>();
+                if (route is not null && context.RequestServices.GetRequiredService<TechnicalCorrelationSettings>().Enabled)
+                {
+                    context.Features.Set(new TechnicalCorrelationCapture(Guid.NewGuid().ToString("N")));
+                    // YARP may copy upstream headers after transforms. This also covers admission
+                    // and inspection failures, before any downstream response starts.
+                    context.Response.OnStarting(static state =>
+                    {
+                        ((HttpResponse)state).Headers.Remove(TechnicalCorrelationHeaders.Name);
+                        return Task.CompletedTask;
+                    }, context.Response);
+                }
                 var snapshots = context.RequestServices.GetRequiredService<LocalPolicySnapshots>();
                 if (route is not null && snapshots.IsProtected(route.Config.RouteId))
                 {
@@ -128,6 +148,7 @@ public static class GatewayHost
             app.MapGatewayHealth();
             app.Services.GetRequiredService<ProxyAdmission>();
             app.Services.GetRequiredService<UpstreamHeadersDeadlineSettings>();
+            app.Services.GetRequiredService<TechnicalCorrelationSettings>();
             // Freeze the global limits at startup, not on the first inspected response.
             app.Services.GetRequiredService<InspectionBudget>();
             // Create process-lifetime instruments and their budget-backed observable callbacks.

@@ -32,9 +32,16 @@ internal static class UpstreamHeadersEligibility
 }
 
 internal sealed class UpstreamHeadersHttpClientFactory(
-    ILogger<ForwarderHttpClientFactory> logger, UpstreamHeadersDeadlineSettings settings, TimeProvider clock)
+    ILogger<ForwarderHttpClientFactory> logger, UpstreamHeadersDeadlineSettings settings, TimeProvider clock,
+    TechnicalCorrelationSettings correlation)
     : ForwarderHttpClientFactory(logger)
 {
+    protected override void ConfigureHandler(ForwarderHttpClientContext context, SocketsHttpHandler handler)
+    {
+        base.ConfigureHandler(context, handler);
+        if (correlation.Enabled) handler.ActivityHeadersPropagator = null;
+    }
+
     protected override HttpMessageHandler WrapHandler(ForwarderHttpClientContext context, HttpMessageHandler handler) =>
         new UpstreamHeadersDeadlineHandler(settings.Timeout, clock) { InnerHandler = base.WrapHandler(context, handler) };
 }

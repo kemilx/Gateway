@@ -13,7 +13,30 @@ public static class SyntheticApi
         var builder = WebApplication.CreateBuilder(args);
         builder.Logging.ClearProviders();
         configure?.Invoke(builder);
+        var correlationEnabled = builder.Configuration.GetValue<bool>("TechnicalCorrelation:Enabled");
+        if (correlationEnabled)
+        {
+            builder.Logging.AddSimpleConsole(options => options.IncludeScopes = false);
+            builder.Services.Configure<LoggerFactoryOptions>(options => options.ActivityTrackingOptions = ActivityTrackingOptions.None);
+            // Opt in only this fixed producer, never framework request logs (URLs/queries).
+            // PostConfigure also keeps configuration reload from widening the category set.
+            builder.Services.PostConfigure<LoggerFilterOptions>(options =>
+            {
+                options.Rules.Clear();
+                options.Rules.Add(new LoggerFilterRule(null, null, LogLevel.Information,
+                    (_, category, level) => category == typeof(SyntheticApi).FullName && level >= LogLevel.Information));
+            });
+        }
         var app = builder.Build();
+        if (correlationEnabled)
+        {
+            var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(SyntheticApi).FullName!);
+            app.Use(async (context, next) =>
+            {
+                ObserveCorrelation(context, logger);
+                await next(context);
+            });
+        }
         app.MapGet("/payment", async context =>
         {
             var bytes = Encoding.UTF8.GetBytes(Sample);
@@ -35,5 +58,20 @@ public static class SyntheticApi
         });
         endpoints?.Invoke(app);
         return app;
+    }
+
+    private static void ObserveCorrelation(HttpContext context, ILogger logger)
+    {
+        var values = context.Request.Headers["X-Gateway-Correlation-Id"];
+        if (values.Count != 1 || values[0] is not { Length: 32 } id
+            || !id.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f')
+            || !id.Any(c => c != '0')) return;
+        try
+        {
+            if (!logger.IsEnabled(LogLevel.Information)) return;
+            logger.LogInformation(new EventId(1, "TechnicalCorrelationObserved"),
+                "Synthetic request received; correlation {CorrelationId}.", id);
+        }
+        catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException)) { }
     }
 }
