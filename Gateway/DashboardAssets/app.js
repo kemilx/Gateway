@@ -160,7 +160,7 @@
     const controller = new AbortController();
     inFlight = controller;
     const timeout = setTimeout(() => controller.abort(), 8000);
-    byId("refresh").disabled = true;
+    byId("refresh").setAttribute("aria-disabled", "true");
     byId("summary").setAttribute("aria-busy", "true");
     setText("request-state", lastReceived ? "Actualizando… Se conserva la última captura." : "Cargando el resumen…");
     if (manual) setText("announcement", "Actualizando el resumen.");
@@ -191,7 +191,7 @@
     } finally {
       clearTimeout(timeout);
       inFlight = null;
-      byId("refresh").disabled = false;
+      byId("refresh").setAttribute("aria-disabled", "false");
       byId("summary").setAttribute("aria-busy", "false");
       schedule();
     }
