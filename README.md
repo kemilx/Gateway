@@ -1,4 +1,4 @@
-# MVP-41 — Observabilidad local sintética y pruebas reproducibles
+# MVP-42 — Límites de retención de observabilidad local verificados
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
@@ -86,8 +86,9 @@ y privacidad de logs, respuestas protected/passthrough, nueve instrumentos con
 puntos almacenados, expulsión al límite de 1000 logs, reinicio sin logs/recursos/
 puntos métricos y navegación real en Edge por logs y métricas. El instrumento
 secundario se generó reiniciando Gateway con configuración sintética opt-in; no se
-observaron los nueve desde una sola instancia. No se probó dinámicamente la
-efectividad de los otros límites. Revisión independiente MVP-39 aprobada
+observaron los nueve desde una sola instancia. En MVP-39 no se probó dinámicamente la
+efectividad de los otros límites; MVP-42 amplía la evidencia según la sección siguiente.
+Revisión independiente MVP-39 aprobada
 exclusivamente para uso local sintético; sin despliegue.
 
 Validación de ciclo de vida MVP-40: **5/5 comprobaciones PASS**, sin cambios al launcher.
@@ -141,6 +142,41 @@ helper está vivo o si falla la sanitización (`logsSanitized=false`): no compar
 Los timeouts limitan las esperas del runner, pero la consola de recuperación puede
 permanecer abierta hasta una intervención manual verificada. La protección de rutas
 no garantiza seguridad frente a carreras de un adversario con acceso al filesystem.
+
+### Validación dinámica de retención (MVP-42)
+
+Validación local con Aspire CLI **13.6.4** y el launcher sin modificaciones:
+**16/16 comprobaciones PASS**, comando del harness de QA con salida 0. No se
+ejecutaron Gateway/TestApi ni se enviaron datos reales. El harness y sus resultados
+son artefactos locales de QA, no un nuevo runner versionado como el de MVP-41.
+
+| Límite | Observación comprobada |
+| --- | --- |
+| 100 trazas | API autenticada: 0, 1, 99 y 100 trazas. Tras enviar la 101, quedaron exactamente las identidades 2–101; se expulsó la primera. Cada traza sintética contenía un solo span. |
+| 1000 puntos por dimensión | Lectura SQLite de la base propia en modo solo lectura: instrumento objetivo con 0, 1, 999 y 1000 puntos en dimensión A. Tras el punto adicional, quedaron exactamente los valores 1–1000, sin el 0. Otra dimensión B conservó sus tres valores 10000–10002 mientras A estaba llena y después de la expulsión. Se usó un gauge entero, no todos los tipos de instrumento. |
+| 10 recursos | API autenticada: 0, 1 y 10 recursos. Un log para el undécimo recibió HTTP 200 **con** `partialSuccess.rejectedLogRecords="1"`; permanecieron exactamente los diez recursos anteriores, sin aceptar ni reemplazar por el nuevo. No se probó ese rechazo mediante las otras señales OTLP. |
+
+Casos de frontera: `Traces_AtLimit_OneHundred`,
+`Traces_OverLimit_EvictsOldest`, `Metrics_AtLimit_OneThousand`,
+`Metrics_SeparateDimension_IndependentCapacity`, `Metrics_OverLimit_EvictsOldest`,
+`Resources_AtLimit_Ten` y `Resources_OverLimit_RejectsEleventh`.
+No se infirió retención de puntos a partir de `hasMetrics`, una página de resultados
+o un gráfico agregado: se compararon conjuntos exactos de valores almacenados por
+dimensión. La base se seleccionó como única carpeta de dashboard nueva respecto
+al inventario previo y se verificó un marcador aleatorio de esa ejecución tanto en
+API como en SQLite. El caso de instrumento vacío se consultó después de ese marcador:
+no significa que todo el dashboard careciera de métricas en ese instante.
+
+`Lifecycle_Shutdown_ProcessesAndPortsGone` confirmó `CTRL_C_EVENT` real,
+salida de los procesos inventariados con PID y fecha de creación, y puertos
+18888/4317/4318 libres. El helper confirmó eliminación de sus logs temporales,
+sin terminación forzada ni recuperación manual. No se borraron bases ni cachés.
+
+La evidencia de esta ejecución no certifica TTL, límite global de bytes, borrado
+seguro, concurrencia, todas las ordenaciones temporales ni retención de todos los
+instrumentos. Los límites de 32 atributos y longitud 256 siguen sin validación
+dinámica. No es aceptación productiva ni una nueva revisión independiente de
+seguridad; se reutilizó el protocolo de consola MVP-41 sin modificarlo.
 
 ### Exportación OTLP sintética (MVP-38)
 
