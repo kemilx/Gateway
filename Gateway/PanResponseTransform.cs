@@ -486,8 +486,17 @@ public sealed class PanResponseTransform
             foreach (var property in value.EnumerateObject())
             {
                 deadline.Check();
-                writer.WritePropertyName(property.Name);
-                CopyElement(property.Value, writer, deadline);
+                if (property.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+                {
+                    writer.WritePropertyName(property.Name);
+                    CopyElement(property.Value, writer, deadline);
+                }
+                else
+                {
+                    deadline.Check();
+                    property.WriteTo(writer);
+                    deadline.Check();
+                }
             }
             writer.WriteEndObject();
         }
