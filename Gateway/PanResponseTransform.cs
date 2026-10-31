@@ -127,8 +127,7 @@ public sealed class PanResponseTransform
                             (int)Math.Min(buffer.Length, policy.MaxBodyBytes + 1L - captured.Length)), deadline.Token);
                         deadline.Check();
                         if (count == 0) break;
-                        if (captured.Length + count > policy.MaxBodyBytes) throw new InspectionException();
-                        captured.Write(buffer, 0, count);
+                        CaptureChunk(captured, buffer.AsSpan(0, count), content.Headers.ContentLength, policy.MaxBodyBytes);
                     }
                 }
                 finally { ArrayPool<byte>.Shared.Return(buffer, clearArray: true); }
@@ -243,6 +242,19 @@ public sealed class PanResponseTransform
                 : PrivacyInspectionOutcome.Faulted);
             throw;
         }
+    }
+
+    internal static void CaptureChunk(MemoryStream captured, ReadOnlySpan<byte> chunk, long? declaredLength, int maxBodyBytes)
+    {
+        if (captured.Length + chunk.Length > maxBodyBytes) throw new InspectionException();
+        if (chunk.IsEmpty) return;
+        if (captured.Length == 0 && maxBodyBytes is > 0 and <= PanPolicyValidator.MaximumBodyBytes
+            && declaredLength is > 0 && declaredLength <= maxBodyBytes)
+        {
+            var capacity = Math.Max(chunk.Length, (int)declaredLength.Value);
+            if (captured.Capacity < capacity) captured.Capacity = capacity;
+        }
+        captured.Write(chunk);
     }
 
     internal void RecordInspectionCompleted(CompiledPanPolicy policy, string? serviceId, PrivacyTelemetry.InspectionSummary summary)
