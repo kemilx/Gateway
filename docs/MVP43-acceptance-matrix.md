@@ -1,6 +1,15 @@
-# Matriz de aceptación y brechas del SRS — actualizada en MVP-46
+# Matriz de aceptación y brechas del SRS — actualizada en MVP-47
 
-**Actualización MVP-46:** TARGET BASE `662f9c14bd7544bfa871888f8940a5597e33368b`
+**Actualización vigente MVP-47:** TARGET BASE `d7ab6951b33eef3df8d7409a2da647359cd286ca`
+más copia escalar y pruebas; manifiesto SHA-256
+`8DC1DBF77F4C0646E4E2C0B01190BDD03C610BBB3F3AA56DBC5E9F3F9C3CB062`.
+Build limpio y **1659/1659 PASS**, cero omitidos; [informe MVP-47](MVP47-scalar-copy-performance.md)
+con 41 regresiones, revisión local de seguridad y nueva campaña del mismo perfil.
+Las asignaciones adicionales observadas bajan de 6.73 a 5.10 MiB/req; CPU y
+throughput siguen costosos y los picos de RAM no acreditan mejora universal.
+Se conservan todos los estados/conteos de RF/RNF/CA y aceptación formal pendiente.
+
+**Actualización histórica MVP-46:** TARGET BASE `662f9c14bd7544bfa871888f8940a5597e33368b`
 más cambios de captura y sus pruebas; manifiesto SHA-256
 `1E9C1C6F9262287F66C322382E7DBF9924B20E59CBFC2B98F27A9137DDBE7E43`.
 Build limpio y **1618/1618 PASS**, cero omitidos, sustituyen el full funcional
@@ -17,7 +26,7 @@ Baseline: [SRS v0.1](../Documentos%20SRS/SRS.md), borrador del 15 de octubre. No
 ## 1. Qué mide esta revisión
 
 Se contrastan **13 RF, 9 RNF y 12 CA** con código y pruebas del repositorio. Es una
-matriz documental apoyada ahora en build y pruebas nuevas MVP-46, además de la
+matriz documental apoyada ahora en build y pruebas nuevas MVP-47, además de la
 evidencia anterior. No es aprobación de aceptación ni revisión de seguridad del
 entorno de producción. Los cambios técnicos se detallan en el
 [contrato MVP-44](MVP44-policy-and-cache-contract.md).
@@ -100,7 +109,14 @@ citan las pruebas reales de proxy cuando el criterio exige comportamiento HTTP.
 
 ## 5. Evidencia utilizada y cómo reproducir
 
-### Evidencia vigente MVP-46, 31 de octubre
+### Evidencia vigente MVP-47, 31 de octubre
+
+- Build Release limpio, **1659/1659 PASS**, cero omitidos; TRX SHA-256 `C940E141EAF42908639AB99BD9D180B7E9B6C9CCA1F56DABAED08722E47D9E3E`.
+- [ScalarCopyTests](../Gateway.Tests/ScalarCopyTests.cs): diferencial legacy, transformado entregado, Unicode/duplicados/escapes/sustitutos aislados, modos/reglas/secondary, fail-closed y cancelación/expiración sin salida y con lease liberado. Todos los contratos HTTP previos se vuelven a ejecutar en la suite completa.
+- [Campaña y contrato MVP-47](MVP47-scalar-copy-performance.md): tres pares, 3072 cuerpos completos, cuatro workers de memoria y recursos liberados. Perfil intacto; menor asignación acumulada no implica menos RAM residente ni cierra presupuestos de negocio.
+- Revisión de seguridad favorable local sobre el delta escalar y sus tests, con hashes cotejados por el coordinador y condiciones de build/full/campaña satisfechas. No hay aceptación de producción ni cambios de SDK/dependencias/configuración/SRS.
+
+### Evidencia histórica MVP-46, 31 de octubre
 
 - Build Release limpio, **1618/1618 PASS**, cero omitidos; TRX SHA-256 `C49858E049871DFFD292E0782C547F625534CFD0E355BECAEDEB3E872124639F`.
 - [CaptureCapacityTests](../Gateway.Tests/CaptureCapacityTests.cs): capacidad y metadata falsa, EOF/límites reales, cancelación y lease. Los contratos anteriores se vuelven a comprobar con la suite completa, no solo con tests del helper.

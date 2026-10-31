@@ -1,8 +1,24 @@
-# MVP-46 — Captura diferida segura y reducción de asignaciones
+# MVP-47 — Copia escalar JSON optimizada y regresiones de privacidad
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
-## Optimización verificada de captura (MVP-46)
+## Copia escalar verificada (MVP-47)
+
+La [optimización de copia escalar JSON](docs/MVP47-scalar-copy-performance.md)
+evita materializar nombres de propiedades escalares, manteniendo recursión de
+contenedores y checkpoints. Sin cambios de políticas, máscaras o paquetes.
+Unicode, duplicados, sustitutos aislados, cancelación y telemetría tienen 41
+regresiones nuevas: **1659/1659 PASS**, cero omitidos, build limpio y revisión de
+seguridad favorable exclusivamente local.
+
+Con el mismo perfil, el coste adicional de asignaciones bajó de **6.73 a 5.10
+MiB/req (−24.27%)** frente a MVP-46; −37.84% observado desde MVP-44. Son campañas
+separadas, no una mejora universal. El delta p95 observado pasó de +80.77 a +65.24
+ms, pero CPU/throughput no mejoraron claramente y hubo un pico mayor de RAM
+residente. El informe detalla corpus, trazabilidad, granularidad cooperativa de
+cancelación y límites: **no hay aceptación de rendimiento ni de producción**.
+
+## Optimización de captura anterior (MVP-46)
 
 La [captura preasignada diferida](docs/MVP46-deferred-capture-performance.md)
 usa una longitud declarada acotada solo tras el primer read positivo, con lease
@@ -57,7 +73,7 @@ exactos, más cuatro workers de memoria con presupuesto liberado. La inspección
 los gates de integridad pasaron, **el rendimiento de negocio no está aceptado**.
 El informe detalla límites, fuentes/binarios y reproducción.
 
-## Estado frente al SRS (MVP-43, actualizado en MVP-46)
+## Estado frente al SRS (MVP-43, actualizado en MVP-47)
 
 La [matriz de aceptación y brechas](docs/MVP43-acceptance-matrix.md) relaciona los
 13 requisitos funcionales, 9 no funcionales y 12 criterios de aceptación del
@@ -81,6 +97,8 @@ MVP-44 modifica el motor y la sustituye por una ejecución nueva de 1579/1579 PA
 MVP-46 sustituye esa evidencia funcional para el motor vigente por **1618/1618 PASS**;
 los resultados de las campañas anteriores permanecen históricos, no se inventa
 una ejecución posterior sobre esos binarios.
+MVP-47 vuelve a ejecutar la suite del motor modificado: **1659/1659 PASS**. Las
+evidencias funcionales anteriores quedan históricas para sus respectivos TARGET.
 Los conteos describen cobertura técnica local, no aprobación formal del SRS,
 presupuestos de rendimiento ni autorización de piloto o producción.
 
