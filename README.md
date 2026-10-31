@@ -1,6 +1,24 @@
-# MVP-47 — Copia escalar JSON optimizada y regresiones de privacidad
+# MVP-48 — Dashboard local más claro y accesible
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
+
+## Dashboard de solo consulta (MVP-48)
+
+[Ver el pulido visual y su validación](docs/MVP48-dashboard-polish.md): cabecera
+sin marcas MVP antiguas, navegación por secciones, tarjetas y tablas más legibles,
+adaptación móvil y foco conservado al actualizar. Se mantienen los avisos de
+privacidad, CSP y alcance local; no se añade administración ni gráficos ficticios.
+
+[Vista de escritorio](docs/images/mvp48-dashboard-desktop.png) ·
+[Vista móvil](docs/images/mvp48-dashboard-mobile.png) ·
+[Abrir panel local](http://127.0.0.1:5100/dashboard/)
+
+Build limpio, **1663/1663 PASS**, cuatro pruebas HTTP nuevas y 38 comprobaciones
+de navegador sobre los assets finales, más cinco controles de visibilidad/recarga.
+Las capturas fueron inspeccionadas por el coordinador. **Zoom nativo al 200 % no
+verificado**; el reflow medido no equivale a certificación de zoom o WCAG completa.
+Los endpoints, DTO y políticas no cambian. La evidencia de rendimiento MVP-47
+permanece ligada a sus binarios históricos, no al nuevo binario con estos assets.
 
 ## Copia escalar verificada (MVP-47)
 
