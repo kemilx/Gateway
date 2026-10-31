@@ -18,6 +18,7 @@ internal static class MemoryHarness
     internal static async Task<WorkerReport> Worker(int concurrency, CancellationToken ct)
     {
         var payload = Common.Payload();
+        var expected = CompareHarness.Expected(true);
         // Preserve the N8/8 MiB profile used to reproduce the historical MVP-05 measurements.
         var budget = new InspectionBudget(Options.Create(new PanPolicyOptions
         {
@@ -50,7 +51,7 @@ internal static class MemoryHarness
         Common.Collect(true);
         var samples = new List<Sample>(6) { Common.Measure("baseline", true, budget) };
         var saturation = new Saturation(false, null, null, null);
-        var streams = Enumerable.Range(0, concurrency).Select(_ => new ControlledWriteStream(writes)).ToArray();
+        var streams = Enumerable.Range(0, concurrency).Select(_ => new ControlledWriteStream(writes, expected)).ToArray();
         var tasks = streams.Select(stream => Invoke(transform, payload, stream, ct)).ToArray();
         try
         {
@@ -85,6 +86,7 @@ internal static class MemoryHarness
         tasks = []; streams = []; telemetry.Dispose(); listener.Dispose(); Common.Collect();
         samples.Add(Common.Measure("post-release", true, budget));
         GC.KeepAlive(payload);
+        GC.KeepAlive(expected);
         return new("gateway.mvp05.memory-worker.v1", Common.Revision, Environment.Version.ToString(),
             OperatingSystem.IsWindows() ? "Windows" : OperatingSystem.IsLinux() ? "Linux" : "Other",
             Environment.ProcessorCount, GCSettings.IsServerGC, GCSettings.LatencyMode.ToString(), "token-dense-v1",
@@ -124,7 +126,7 @@ internal static class MemoryHarness
             Common.Require(worker.Schema == "gateway.mvp05.memory-worker.v1" && worker.Status == "passed" && worker.Concurrency == n && worker.Release && worker.Canary);
             workers.Add(worker);
         }
-        var report = new MemoryReport("gateway.mvp05.memory.v1", "passed", "MEASURED_NOT_SIZED", "No target memory limit. Heap information reflects the latest GC; natural samples do not force GC. Source payload is excluded from baseline deltas.", workers,
+        var report = new MemoryReport("gateway.mvp05.memory.v1", "passed", "MEASURED_NOT_SIZED", "No target memory limit. Heap information reflects the latest GC; natural samples do not force GC. Source payload and expected masked payload are excluded from baseline deltas. Results are not performance-equivalent to earlier reports.", workers,
             workers.SelectMany(w => w.Samples.Skip(1).Select(s => new Delta(w.Concurrency, s.Phase, s.ForcedGc,
                 s.ManagedBytes - w.Samples[0].ManagedBytes, s.WorkingSetBytes - w.Samples[0].WorkingSetBytes, s.PrivateBytes - w.Samples[0].PrivateBytes))).ToArray());
         await Common.Save(output, "memory", report, Markdown);
@@ -143,11 +145,17 @@ internal sealed class Barrier(int count)
     internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal async ValueTask Arrive(CancellationToken ct) { if (Interlocked.Increment(ref arrived) == count) Ready.TrySetResult(); await Release.Task.WaitAsync(ct); }
 }
-internal sealed class ControlledWriteStream(Barrier barrier) : Stream
+internal sealed class ControlledWriteStream(Barrier barrier, byte[] expected) : Stream
 {
+    private readonly object gate = new();
+    private int writes;
     internal bool Canary { get; private set; }
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
-    { await barrier.Arrive(cancellationToken); Canary = Common.Canary(buffer.Span, Common.BodySize); }
+    {
+        lock (gate) { writes++; Canary = false; }
+        await barrier.Arrive(cancellationToken);
+        lock (gate) { Canary = writes == 1 && buffer.Span.SequenceEqual(expected); }
+    }
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     public override bool CanRead => false; public override bool CanSeek => false; public override bool CanWrite => true;
     public override long Length => throw new NotSupportedException(); public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }

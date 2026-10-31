@@ -13,6 +13,7 @@ internal static class IsolatedHarness
         Common.Require(maxConcurrentInspections is >= 4 and <= 8);
         var concurrencies = new[] { 1, 2, 4, maxConcurrentInspections }.Distinct().Order().ToArray();
         var target = limitMiB * 1048576L; var allowed = target * (100 - headroom) / 100;
+        var expected = CompareHarness.Expected(true);
         var runs = new List<IsolatedRun>(repetitions * concurrencies.Length); var complete = false; var stage = "api-start";
         try
         {
@@ -32,7 +33,7 @@ internal static class IsolatedHarness
                     using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(30) };
                     stage = "warmup";
                     await Request(client, "/protected/payment", null, token);
-                    await Request(client, "/protected/load", Common.BodySize, token);
+                    await Request(client, "/protected/load", expected, token);
                     stage = "reset"; await gateway.Command("reset", "reset", token);
                     stage = "load";
                     var times = new ConcurrentBag<double>(); var counts = new ConcurrentDictionary<int, int>(); var next = -1;
@@ -44,7 +45,7 @@ internal static class IsolatedHarness
                             while (Interlocked.Increment(ref next) < requests)
                             {
                                 var started = Stopwatch.GetTimestamp();
-                                var status = await Request(client, "/protected/load", Common.BodySize, token);
+                                var status = await Request(client, "/protected/load", expected, token);
                                 times.Add(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                                 counts.AddOrUpdate(status, 1, (_, value) => value + 1);
                             }
@@ -100,11 +101,16 @@ internal static class IsolatedHarness
             "Candidate-only: maxConcurrentInspections configures synthetic workers only; Gateway/appsettings defaults remain unchanged. Passing means only this local candidate met the selected limit; it does not authorize production or changes to defaults.", runs, aggregates);
         await Common.Save(output, "isolated", report, Markdown); return passed;
     }
-    private static async Task<int> Request(HttpClient client, string path, int? length, CancellationToken ct)
+    internal static async Task<int> Request(HttpClient client, string path, byte[]? expected, CancellationToken ct)
     {
+        if (expected is not null)
+        {
+            await CompareHarness.Request(client, path, expected, ct);
+            return 200;
+        }
         using var response = await client.GetAsync(path, HttpCompletionOption.ResponseHeadersRead, ct);
         var bytes = await response.Content.ReadAsByteArrayAsync(ct);
-        Common.Require((int)response.StatusCode == 200 && Common.Canary(bytes, length ?? bytes.Length)); return 200;
+        Common.Require((int)response.StatusCode == 200 && Common.Canary(bytes, bytes.Length)); return 200;
     }
     private static double Percentile(double[] sorted, double percentile) => sorted[(int)Math.Ceiling(sorted.Length * percentile) - 1];
     private static double Median(IEnumerable<double> values)

@@ -19,6 +19,7 @@ internal static class HttpHarness
     internal static async Task Run(string output, int requests, CancellationToken ct)
     {
         var payload = Common.Payload();
+        var expected = CompareHarness.Expected(true);
         await using var api = SyntheticApi.Build([], b => b.WebHost.UseUrls("http://127.0.0.1:0"), app => app.MapGet("/load", async context =>
         {
             context.Response.ContentType = "application/json"; context.Response.ContentLength = payload.Length;
@@ -53,7 +54,7 @@ internal static class HttpHarness
             using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { BaseAddress = new Uri(Address(gateway)), Timeout = TimeSpan.FromSeconds(30) };
             var budget = gateway.Services.GetRequiredService<InspectionBudget>();
             await Request(client, "/protected/payment", null, ct);
-            await Request(client, "/protected/load", payload.Length, ct);
+            await Request(client, "/protected/load", expected, ct);
             long outcomes = 0;
             long durations = 0;
             using var listener = new MeterListener();
@@ -85,7 +86,7 @@ internal static class HttpHarness
                         while (Interlocked.Increment(ref next) < requests)
                         {
                             var started = Stopwatch.GetTimestamp();
-                            var status = await Request(client, "/protected/load", payload.Length, ct);
+                            var status = await Request(client, "/protected/load", expected, ct);
                             times.Add(Stopwatch.GetElapsedTime(started).TotalMilliseconds); counts.AddOrUpdate(status, 1, (_, count) => count + 1);
                         }
                     }));
@@ -105,7 +106,7 @@ internal static class HttpHarness
             }
             var report = new HttpReport("gateway.mvp05.http.v1", "passed", "MEASURED_NOT_SIZED", Common.Revision,
                 "token-dense-v1", payload.Length,
-                "API + Gateway + client share one process. Memory is observational, not isolated; peaks are per-metric sampled maxima at 10ms and can miss transients. Latencies include full body consumption and canary validation; nearest-rank percentiles.", scenarios);
+                "API + Gateway + client and the expected masked payload share one process. Memory is observational, not isolated; peaks are per-metric sampled maxima at 10ms and can miss transients. Latencies include full body consumption and byte-for-byte validation; nearest-rank percentiles.", scenarios);
             await Common.Save(output, "http", report, Markdown);
         }
         finally
@@ -115,11 +116,16 @@ internal static class HttpHarness
         }
     }
     private static string Address(WebApplication app) => app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
-    private static async Task<int> Request(HttpClient client, string endpoint, int? length, CancellationToken ct)
+    internal static async Task<int> Request(HttpClient client, string endpoint, byte[]? expected, CancellationToken ct)
     {
+        if (expected is not null)
+        {
+            await CompareHarness.Request(client, endpoint, expected, ct);
+            return 200;
+        }
         using var response = await client.GetAsync(endpoint, HttpCompletionOption.ResponseHeadersRead, ct);
         var bytes = await response.Content.ReadAsByteArrayAsync(ct);
-        Common.Require((int)response.StatusCode == 200 && Common.Canary(bytes, length ?? bytes.Length));
+        Common.Require((int)response.StatusCode == 200 && Common.Canary(bytes, bytes.Length));
         return (int)response.StatusCode;
     }
     private static async Task SampleLoop(InspectionBudget budget, Peak peak, CancellationToken ct)
