@@ -103,6 +103,45 @@ se conservaron. La captura del árbol anterior a la señal no prueba ausencia de
 ya desvinculados, ni garantiza el mismo comportamiento al cerrar una ventana o en
 todas las terminales. No se probó borrado seguro ni limpieza automática de bases/cachés.
 
+### Prueba reproducible del ciclo de vida (MVP-41)
+
+En Windows, con Node >=20, Windows PowerShell y los requisitos del launcher MVP-39:
+
+```powershell
+node scripts/observability/Test-LocalObservabilityLifecycle.test.cjs
+node scripts/observability/Test-LocalObservabilityLifecycle.cjs
+```
+
+El primer comando ejecuta las pruebas focales mediante `node:test`. El segundo
+arranca el launcher en una consola dedicada, sin requerir hosts Gateway/TestApi,
+envía únicamente OTLP sintético y ejecuta dos ciclos. Puede invocarse desde otra
+carpeta usando la ruta absoluta del script. No admite parámetros salvo `--help`.
+Antes de empezar deben estar libres 18888, 4317 y 4318: si alguno está ocupado,
+falla sin detener al propietario ni crear una sesión de prueba. No ejecutar dos
+pruebas simultáneamente ni usar con datos reales.
+
+La salida JSON y `results.json` bajo una carpeta única en
+`$env:LOCALAPPDATA\Temp\opencode\MVP41-lifecycle\run-*` contienen resultados
+cerrados, no tokens ni claves API. `positive` confirma un log y un recurso con
+métricas mediante API autenticada; `stop1` y `stop2` comprueban `CTRL_C_EVENT` real,
+salida del árbol inventariado y puertos libres; `restart` comprueba cero logs y cero
+recursos antes de nuevos emisores. Código de salida 0 exige los cuatro PASS y la
+confirmación de eliminación de los logs temporales propios (`logsSanitized=true`).
+Los snapshots de procesos no prueban ausencia de procesos previamente desvinculados,
+ni la consulta de recursos vacíos sustituye una lectura independiente de puntos SQLite.
+
+No termina procesos por nombre o puerto, no aplica terminación forzada y no elimina
+sesiones del launcher, bases SQLite ni cachés. Si no puede confirmar el cierre,
+devuelve FAIL; `manualRecovery=true` identifica que el helper conserva su consola
+para no cerrarla sobre hijos vivos. Inspeccionar el árbol actual y cotejar PID,
+fecha de creación y ascendencia con las identidades del resultado antes de cualquier
+intervención. No terminar un proceso basándose solo en un PID. Los archivos raw
+`out.txt`/`err.txt` de los ciclos pueden contener credenciales efímeras mientras el
+helper está vivo o si falla la sanitización (`logsSanitized=false`): no compartirlos.
+Los timeouts limitan las esperas del runner, pero la consola de recuperación puede
+permanecer abierta hasta una intervención manual verificada. La protección de rutas
+no garantiza seguridad frente a carreras de un adversario con acceso al filesystem.
+
 ### Exportación OTLP sintética (MVP-38)
 
 Desactivada por defecto e independiente en ambos procesos. Para enviar únicamente
