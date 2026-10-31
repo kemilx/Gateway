@@ -59,13 +59,23 @@ Detener hosts y dashboard con Ctrl+C en sus respectivas terminales. Comprobar de
 y, si queda algún listener, identificar su propietario y detener solo procesos cuya
 pertenencia a esta sesión se haya comprobado; no matar procesos por nombre. El cierre
 de la terminal no garantiza por sí solo que todos los descendientes hayan terminado.
-`None` usa una
-base SQLite temporal, no garantiza ausencia de escritura en disco. La sesión nueva
-no pretende reabrir la anterior. Un cierre forzado puede dejar base y archivos WAL;
-solo tras detener los procesos propios, eliminar si se desea el directorio dedicado
-`$env:LOCALAPPDATA\Temp\opencode\MVP39-local-observability-runtime`. También
-contiene cachés y logs del CLI: tratarlos como sensibles y no compartirlos. No borrar
-directorios temporales generales ni procesos de otros usuarios.
+`None` usa una base SQLite temporal, no garantiza ausencia de escritura en disco ni
+borrado seguro. La sesión nueva no pretende reabrir la anterior. Incluso tras Ctrl+C
+normal pueden quedar `dashboard.db` y carpetas temporales; un cierre forzado también
+puede dejar archivos WAL.
+
+Para una limpieza limitada, inventariar antes y después de la sesión las carpetas de
+`$env:LOCALAPPDATA\Temp\opencode\MVP39-local-observability-runtime` y registrar el
+árbol de procesos propio. Solo tras verificar su salida y los puertos libres, revisar
+cada carpeta nueva cuya propiedad esté probada. Una carpeta `session-<guid>` que
+contenga exclusivamente `user.npmrc` y `global.npmrc` vacíos puede limpiarse eliminando
+esos dos archivos y después la carpeta vacía, sin borrado recursivo. Ante contenido
+inesperado, reparse points o propiedad incierta, conservarla. No borrar el directorio
+runtime completo ni cachés compartidas/históricas: también contiene logs del CLI y
+temporales de otras sesiones. No eliminar bases SQLite de atribución dudosa. Tratar
+estos archivos como sensibles y no compartir enlaces de login, tokens ni claves API.
+No borrar directorios temporales generales ni procesos de otros usuarios. Esta
+limpieza no garantiza eliminación de copias, backups ni recuperación forense.
 
 Los límites configurados son 1000 logs, 100 trazas, 1000 puntos métricos por
 dimensión, 10 recursos, 32 atributos y longitud 256. No son TTL ni límite global
@@ -77,8 +87,21 @@ puntos almacenados, expulsión al límite de 1000 logs, reinicio sin logs/recurs
 puntos métricos y navegación real en Edge por logs y métricas. El instrumento
 secundario se generó reiniciando Gateway con configuración sintética opt-in; no se
 observaron los nueve desde una sola instancia. No se probó dinámicamente la
-efectividad de los otros límites ni Ctrl+C ordinario. Revisión independiente final
-aprobada exclusivamente para uso local sintético; sin despliegue.
+efectividad de los otros límites. Revisión independiente MVP-39 aprobada
+exclusivamente para uso local sintético; sin despliegue.
+
+Validación de ciclo de vida MVP-40: **5/5 comprobaciones PASS**, sin cambios al launcher.
+Se envió `CTRL_C_EVENT` real (evento 0, equivalente a Ctrl+C) en una consola Windows
+dedicada: en dos ciclos terminaron el launcher y sus descendientes inventariados,
+quedaron libres los tres puertos y no se recurrió a terminación forzada. Antes del
+primer cierre, la API autenticada confirmó un marcador de log sintético y un recurso
+con métricas; tras reiniciar sin emisores devolvió cero logs y cero recursos. Esto
+no es una consulta independiente de puntos métricos en SQLite. Se retiraron únicamente
+dos carpetas propias con cuatro archivos npmrc vacíos, sin afectar otras carpetas;
+los directorios de dashboard y una base SQLite residual de propiedad no concluyente
+se conservaron. La captura del árbol anterior a la señal no prueba ausencia de procesos
+ya desvinculados, ni garantiza el mismo comportamiento al cerrar una ventana o en
+todas las terminales. No se probó borrado seguro ni limpieza automática de bases/cachés.
 
 ### Exportación OTLP sintética (MVP-38)
 
