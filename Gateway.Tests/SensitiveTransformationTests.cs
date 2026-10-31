@@ -315,6 +315,7 @@ public sealed class SensitiveTransformationTests
         Assert.False(response.Content.Headers.Contains("Last-Modified"));
         Assert.Equal("identity", hosts.AcceptEncoding);
         Assert.Equal(1, hosts.Contacts);
+        await WaitForBudgetRelease(hosts.Budget);
         var summaryText = await hosts.Client.GetStringAsync("/dashboard/api/summary");
         using var summary = JsonDocument.Parse(summaryText);
         var policy = summary.RootElement.GetProperty("policies")[0];
@@ -373,11 +374,24 @@ public sealed class SensitiveTransformationTests
             Assert.Equal("[REDACTED]", actual.RootElement.GetProperty("values")[0].GetString());
             Assert.Equal(transformation == "Phone" ? "+*2345" : "[REDACTED]", actual.RootElement.GetProperty("values")[1].GetString());
         }
+        await WaitForBudgetRelease(hosts.Budget);
         var totals = hosts.Telemetry.DashboardMetrics;
         Assert.Equal(lateError ? 1 : 0, totals.Outcomes.Blocked);
         Assert.Equal(!lateError && mode == "Block" ? 1 : 0, totals.Outcomes.PolicyBlocked);
         Assert.Equal(!lateError && mode == "Mask" ? 2 : 0, totals.ValidatedMasks);
         Assert.Equal((0, 0L), hosts.Budget.Snapshot);
+    }
+
+    private static async Task WaitForBudgetRelease(InspectionBudget budget)
+    {
+        // Reading the client response can finish before server-side terminal publication
+        // and lease disposal. Wait for the resource itself, not a telemetry outcome.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (budget.Snapshot != (0, 0L))
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            await Task.Yield();
+        }
     }
 
     private sealed record Result(int Status, byte[] Body, DashboardMetrics Metrics);

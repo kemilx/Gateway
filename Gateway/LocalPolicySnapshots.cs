@@ -32,6 +32,8 @@ internal sealed class LocalPolicySnapshot
 
     internal static bool SameBehavior(CompiledPanPolicy a, CompiledPanPolicy b) =>
         a.Mode == b.Mode && a.Transformation == b.Transformation && a.MaxBodyBytes == b.MaxBodyBytes
+        && a.Severity == b.Severity && a.FailureBehavior == b.FailureBehavior
+        && a.NonInspectableBehavior == b.NonInspectableBehavior
         && a.SecondaryPanDetection == b.SecondaryPanDetection && a.Segments.SequenceEqual(b.Segments)
         && a.AdditionalRules.Length == b.AdditionalRules.Length
         && a.AdditionalRules.Zip(b.AdditionalRules).All(pair => pair.First.Transformation == pair.Second.Transformation
@@ -144,6 +146,7 @@ internal sealed class LocalPolicyFileReader(string path, IReadOnlyList<RouteConf
                 || fields[0].Value.ValueKind != JsonValueKind.Object) throw new FormatException();
             using var input = new MemoryStream(bytes.ToArray(), writable: false);
             using var configuration = (ConfigurationRoot)new ConfigurationBuilder().AddJsonStream(input).Build();
+            PanPolicyCatalog.ValidateRuleShape(configuration);
             var options = new PanPolicyOptions();
             configuration.GetSection(PanPolicyOptions.SectionName).Bind(options, b => b.ErrorOnUnknownConfiguration = true);
             var result = new PanPolicyValidator(routes).Validate(Options.DefaultName, options);

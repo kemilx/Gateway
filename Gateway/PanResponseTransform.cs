@@ -45,16 +45,39 @@ public sealed class PanResponseTransform
         response.Headers.CacheControl = "no-store";
         var upstream = context.ProxyResponse;
         if (upstream is null) return;
-        if (HttpMethods.IsHead(context.HttpContext.Request.Method) || (int)upstream.StatusCode is 204 or 304)
+        if (HttpMethods.IsHead(context.HttpContext.Request.Method) || (int)upstream.StatusCode == 204)
         {
             context.SuppressResponseBody = true;
             RecordExclusion(policy, serviceId, HttpMethods.IsHead(context.HttpContext.Request.Method)
                 ? "excluded_head" : "excluded_bodyless", correlationId);
             return;
         }
+        if ((int)upstream.StatusCode == 304)
+        {
+            context.SuppressResponseBody = true;
+            // Replace the upstream response before invoking any external telemetry consumer.
+            response.Headers.Clear();
+            response.StatusCode = StatusCodes.Status502BadGateway;
+            response.Headers.CacheControl = "no-store";
+            response.ContentType = "application/json; charset=utf-8";
+            response.ContentLength = Failure.Length;
+            context.CancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                await response.Body.WriteAsync(Failure, context.CancellationToken);
+            }
+            finally
+            {
+                telemetry.RecordPreflightBlocked(policy,
+                    summary => RecordInspectionCompleted(policy, serviceId, summary, correlationId));
+            }
+            return;
+        }
         var content = upstream.Content;
-        if (!MediaTypeHeaderValue.TryParse(content.Headers.ContentType?.ToString(), out var media)
-            || !string.Equals(media.MediaType, "application/json", StringComparison.OrdinalIgnoreCase))
+        var parsedMedia = MediaTypeHeaderValue.TryParse(content.Headers.ContentType?.ToString(), out var media);
+        var unsupported = content.Headers.ContentEncoding.Count != 0 || (int)upstream.StatusCode == 206 || response.StatusCode == 206
+            || (media?.CharSet is not null && !string.Equals(media.CharSet.Trim('"'), "utf-8", StringComparison.OrdinalIgnoreCase));
+        if (!unsupported && (!parsedMedia || !string.Equals(media?.MediaType, "application/json", StringComparison.OrdinalIgnoreCase)))
         {
             RecordExclusion(policy, serviceId, "excluded_media_type", correlationId);
             return;
@@ -88,8 +111,7 @@ public sealed class PanResponseTransform
             try
             {
                 deadline.Check();
-                if (content.Headers.ContentEncoding.Count != 0 || response.StatusCode == 206
-                    || (media.CharSet is not null && !string.Equals(media.CharSet.Trim('"'), "utf-8", StringComparison.OrdinalIgnoreCase))
+                if (unsupported
                     || content.Headers.ContentLength > policy.MaxBodyBytes)
                     throw new InspectionException();
 

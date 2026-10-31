@@ -101,6 +101,37 @@ public sealed class LocalPolicyReloadIntegrationTests : IDisposable
         Assert.Equal("************1111", JsonNode.Parse(text)!["payment"]!["cardNumber"]!.GetValue<string>());
     }
 
+    [Theory]
+    [InlineData("Mask")] [InlineData("Observe")] [InlineData("Block")]
+    public async Task Protected_304_remains_blocked_after_metadata_policy_reload(string mode)
+    {
+        await Replace(Document());
+        await using var upstream = Upstream(c =>
+        {
+            c.Response.StatusCode = 304; c.Response.Headers.ETag = "\"upstream-marker\"";
+            c.Response.Headers.SetCookie = "secret=upstream-marker"; return Task.CompletedTask;
+        });
+        await upstream.StartAsync(); var logs = new Logs();
+        await using var gateway = GatewayApp(Address(upstream) + "/", logs); await gateway.StartAsync();
+        using var client = Client(gateway);
+        async Task Check()
+        {
+            using var response = await client.GetAsync("/protected/cache");
+            Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+            Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", await response.Content.ReadAsStringAsync());
+            Assert.True(response.Headers.CacheControl!.NoStore); Assert.Null(response.Headers.ETag);
+            Assert.False(response.Headers.Contains("Set-Cookie"));
+        }
+        await Check();
+        var updated = Document(mode, "v2"); Policy(updated)["Severity"] = "Critical";
+        await Replace(updated);
+        await logs.Wait(l => l.Count(e => e.Id == 7 && e.Field("Status") == "applied") == 2);
+        Assert.Equal("Critical", gateway.Services.GetRequiredService<LocalPolicySnapshots>().Active.Catalog.Find("protected-payment")!.Severity);
+        await Check();
+        Assert.DoesNotContain(logs.All, e => e.Id == 4);
+        Assert.Equal((0, 0L), gateway.Services.GetRequiredService<InspectionBudget>().Snapshot);
+    }
+
     [Fact]
     public async Task Polling_atomic_replace_preserves_inflight_capture_and_recovers_with_consistent_summary_events()
     {

@@ -708,7 +708,7 @@ public sealed class PrivacyTelemetryTests
             ("head204", HttpMethods.Head, HttpStatusCode.NoContent, "text/plain", "excluded_head"),
             ("head304", HttpMethods.Head, HttpStatusCode.NotModified, "invalid", "excluded_head"),
             ("204", HttpMethods.Get, HttpStatusCode.NoContent, "text/plain", "excluded_bodyless"),
-            ("304", HttpMethods.Get, HttpStatusCode.NotModified, (string?)null, "excluded_bodyless"),
+            ("304", HttpMethods.Get, HttpStatusCode.NotModified, (string?)null, "blocked"),
             ("plain", HttpMethods.Get, HttpStatusCode.OK, "text/plain", "excluded_media_type"),
             ("missing", HttpMethods.Get, HttpStatusCode.OK, (string?)null, "excluded_media_type"),
             ("invalid", HttpMethods.Get, HttpStatusCode.OK, "invalid", "excluded_media_type"),
@@ -718,6 +718,7 @@ public sealed class PrivacyTelemetryTests
         using var held = budget.TryAcquire(1);
         Assert.NotNull(held);
         var before = telemetry.DashboardMetrics;
+        var expectedDashboard = before;
         foreach (var (id, method, status, mediaType, expected) in scenarios)
         {
             var policy = Policy("Exclusion" + id) with { Mode = mode };
@@ -731,12 +732,14 @@ public sealed class PrivacyTelemetryTests
             Assert.IsType<Counter<long>>(sample.Instrument);
             Assert.Single(metrics.ForPolicyAll(policy.PolicyId));
             Assert.Equal(method == HttpMethods.Head || (int)status is 204 or 304, invocation.Context.SuppressResponseBody);
-            Assert.Equal((int)status, invocation.Context.HttpContext.Response.StatusCode);
+            Assert.Equal(id == "304" ? 502 : (int)status, invocation.Context.HttpContext.Response.StatusCode);
             Assert.Equal("no-store", invocation.Context.HttpContext.Response.Headers.CacheControl);
-            Assert.Empty(downstream.ToArray());
+            if (id == "304") Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", Encoding.UTF8.GetString(downstream.ToArray()));
+            else Assert.Empty(downstream.ToArray());
             Assert.False(content.ReadAttempted);
             Assert.Equal((1, 1L), budget.Snapshot);
-            Assert.Equal(before, telemetry.DashboardMetrics);
+            if (id == "304") expectedDashboard = expectedDashboard with { Outcomes = expectedDashboard.Outcomes with { Blocked = expectedDashboard.Outcomes.Blocked + 1 } };
+            Assert.Equal(expectedDashboard, telemetry.DashboardMetrics);
         }
         Assert.Equal(8, Enum.GetValues<PrivacyInspectionOutcome>().Length);
     }
@@ -869,12 +872,13 @@ public sealed class PrivacyTelemetryTests
             await gateway.StartAsync();
             var telemetry = gateway.Services.GetRequiredService<PrivacyTelemetry>();
             var before = telemetry.DashboardMetrics;
+            var expected = before;
             using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { BaseAddress = new Uri(Address(gateway)), Timeout = TimeSpan.FromSeconds(15) };
             foreach (var (method, path, status, outcome) in new[]
             {
                 (HttpMethod.Head, "/204", 204, "excluded_head"),
                 (HttpMethod.Get, "/204", 204, "excluded_bodyless"),
-                (HttpMethod.Get, "/304", 304, "excluded_bodyless"),
+                (HttpMethod.Get, "/304", 502, "blocked"),
                 (HttpMethod.Get, "/plain", 200, "excluded_media_type")
             })
             {
@@ -882,9 +886,10 @@ public sealed class PrivacyTelemetryTests
                 using var request = new HttpRequestMessage(method, "/protected" + path);
                 using var response = await client.SendAsync(request);
                 Assert.Equal(status, (int)response.StatusCode);
-                Assert.Equal("preserved", Assert.Single(response.Headers.GetValues("X-Synthetic")));
+                if (path == "/304") Assert.False(response.Headers.Contains("X-Synthetic"));
+                else Assert.Equal("preserved", Assert.Single(response.Headers.GetValues("X-Synthetic")));
                 Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
-                Assert.Equal(status == 200 ? "synthetic uninspected body" : "", await response.Content.ReadAsStringAsync());
+                Assert.Equal(path == "/304" ? "{\"code\":\"privacy_inspection_failed\"}" : status == 200 ? "synthetic uninspected body" : "", await response.Content.ReadAsStringAsync());
                 // Publication is synchronous and precedes the exclusion return/body forwarding.
                 // Completed HTTP response + exactly one captured callback is the exclusion barrier;
                 // Duration.Samples cannot advance on this path. The thrower captures before throwing.
@@ -893,13 +898,14 @@ public sealed class PrivacyTelemetryTests
                 Assert.Equal(4, sample.Tags.Count);
                 Assert.Equal(1, sample.Value);
                 Assert.Equal(Outcomes, sample.InstrumentName);
-                Assert.Equal(before, telemetry.DashboardMetrics);
+                if (path == "/304") expected = expected with { Outcomes = expected.Outcomes with { Blocked = expected.Outcomes.Blocked + 1 } };
+                Assert.Equal(expected, telemetry.DashboardMetrics);
                 Assert.Equal((0, 0L), gateway.Services.GetRequiredService<InspectionBudget>().Snapshot);
             }
             metrics.Clear();
             Assert.Equal("synthetic uninspected body", await client.GetStringAsync("/passthrough/plain"));
             Assert.Empty(metrics.ForPolicyAll(id));
-            Assert.Equal(before, telemetry.DashboardMetrics);
+            Assert.Equal(expected, telemetry.DashboardMetrics);
         }
         finally { await gateway.StopAsync(); await api.StopAsync(); }
     }

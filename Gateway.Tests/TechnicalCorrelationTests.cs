@@ -39,9 +39,9 @@ public sealed class TechnicalCorrelationTests
             caller.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => transform.ApplyAsync(context, policy, "synthetic-api").AsTask());
         }
         else await transform.ApplyAsync(context, policy, "synthetic-api");
-        var exclusion = scenario is "head" or "204" or "304" or "nonJSON";
+        var exclusion = scenario is "head" or "204" or "nonJSON";
         var noEvents = scenario is "absent" or "precancel" or "logger-failed";
-        Assert.Equal(noEvents ? 0 : exclusion || scenario is "capacity" or "invalidJSON" ? 1 : 2, logs.Events.Count);
+        Assert.Equal(noEvents ? 0 : exclusion || scenario is "capacity" or "invalidJSON" or "304" ? 1 : 2, logs.Events.Count);
         Assert.All(logs.Events, e => { Assert.Equal(Id, e.State["CorrelationId"]); Assert.Equal(1, e.State["SchemaVersion"]); Assert.Null(e.Exception); });
         if (exclusion)
         {
@@ -52,10 +52,10 @@ public sealed class TechnicalCorrelationTests
         else if (!noEvents)
         {
             var terminal = Assert.Single(logs.Events, e => e.Id.Id == 5);
-            Assert.Equal(scenario == "capacity" ? "capacity_exceeded" : scenario == "invalidJSON" ? "blocked" : scenario == "Block" ? "policy_blocked" : "inspected", terminal.State["Outcome"]);
+            Assert.Equal(scenario == "capacity" ? "capacity_exceeded" : scenario is "invalidJSON" or "304" ? "blocked" : scenario == "Block" ? "policy_blocked" : "inspected", terminal.State["Outcome"]);
         }
-        Assert.Equal(scenario == "capacity" ? 503 : scenario is "Block" or "invalidJSON" ? 502 : 200, http.Response.StatusCode);
-        Assert.Equal(scenario == "capacity" ? "{\"code\":\"privacy_capacity_exceeded\"}" : scenario == "invalidJSON" ? "{\"code\":\"privacy_inspection_failed\"}" : scenario == "Block" ? "{\"code\":\"privacy_response_blocked\"}" : scenario == "Observe" ? Body : exclusion || scenario is "absent" or "precancel" ? "" : "{\"selected\":\"************1111\"}", Encoding.UTF8.GetString(output.ToArray()));
+        Assert.Equal(scenario == "capacity" ? 503 : scenario is "Block" or "invalidJSON" or "304" ? 502 : 200, http.Response.StatusCode);
+        Assert.Equal(scenario == "capacity" ? "{\"code\":\"privacy_capacity_exceeded\"}" : scenario is "invalidJSON" or "304" ? "{\"code\":\"privacy_inspection_failed\"}" : scenario == "Block" ? "{\"code\":\"privacy_response_blocked\"}" : scenario == "Observe" ? Body : exclusion || scenario is "absent" or "precancel" ? "" : "{\"selected\":\"************1111\"}", Encoding.UTF8.GetString(output.ToArray()));
         Assert.Equal(scenario == "capacity" ? (1, 4096L) : (0, 0L), budget.Snapshot);
     }
 

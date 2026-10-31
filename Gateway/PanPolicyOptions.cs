@@ -39,6 +39,9 @@ public sealed class PanPolicyDefinition
     public string Version { get; set; } = "";
     public string RouteId { get; set; } = "";
     public string Mode { get; set; } = "";
+    public string Severity { get; set; } = "High";
+    public string FailureBehavior { get; set; } = "FailClosed";
+    public string NonInspectableBehavior { get; set; } = "ExcludeNonJson";
     public string Transformation { get; set; } = "PAN";
     public string Selector { get; set; } = "";
     public int MaxBodyBytes { get; set; }
@@ -80,6 +83,9 @@ public sealed class PanPolicyValidator(IReadOnlyList<RouteConfig> knownRoutes) :
             if (policy is null || !SafeIdentifier(policy.PolicyId) || !SafeIdentifier(policy.Version)
                 || !SafeIdentifier(policy.RouteId) || !knownRouteIds.Contains(policy.RouteId) || !routes.Add(policy.RouteId)
                 || policy.Mode is not ("Mask" or "Block" or "Observe")
+                || policy.Severity is not ("Low" or "Medium" or "High" or "Critical")
+                || policy.FailureBehavior != "FailClosed"
+                || policy.NonInspectableBehavior != "ExcludeNonJson"
                 || policy.Transformation is not ("PAN" or "Email" or "Phone")
                 || !SafeSelector(policy.Selector)
                 || !ValidRules(policy)
@@ -137,6 +143,9 @@ public sealed record CompiledPanPolicy(string PolicyId, string Version, string R
     ImmutableArray<string> Segments, int MaxBodyBytes)
 {
     public string Mode { get; init; } = "Mask";
+    public string Severity { get; init; } = "High";
+    public string FailureBehavior { get; init; } = "FailClosed";
+    public string NonInspectableBehavior { get; init; } = "ExcludeNonJson";
     public string Transformation { get; init; } = "PAN";
     public bool SecondaryPanDetection { get; init; }
     public ImmutableArray<CompiledSensitiveRule> AdditionalRules { get; init; } = [];
@@ -157,15 +166,29 @@ public sealed class PanPolicyCatalog
             PanPolicyValidator.CompileSelector(p.Selector), p.MaxBodyBytes)
             {
                 Mode = p.Mode, Transformation = p.Transformation, SecondaryPanDetection = p.SecondaryPanDetection,
+                Severity = p.Severity, FailureBehavior = p.FailureBehavior, NonInspectableBehavior = p.NonInspectableBehavior,
                 AdditionalRules = p.AdditionalRules.Select(rule => new CompiledSensitiveRule(
                     PanPolicyValidator.CompileSelector(rule.Selector), rule.Transformation)).ToImmutableArray()
             }).ToFrozenDictionary(p => p.RouteId, StringComparer.Ordinal);
     }
 
-    private static void ValidateRuleShape(IConfiguration configuration)
+    internal static void ValidateRuleShape(IConfiguration configuration)
     {
         foreach (var policy in configuration.GetSection("PanPolicies:Policies").GetChildren())
         {
+            foreach (var field in policy.GetChildren())
+            {
+                var valid = field.Key.Equals("Severity", StringComparison.OrdinalIgnoreCase)
+                    ? field.Value is "Low" or "Medium" or "High" or "Critical"
+                    : field.Key.Equals("FailureBehavior", StringComparison.OrdinalIgnoreCase)
+                        ? field.Value == "FailClosed"
+                        : field.Key.Equals("NonInspectableBehavior", StringComparison.OrdinalIgnoreCase)
+                            ? field.Value == "ExcludeNonJson" : true;
+                if (!valid || ((field.Key.Equals("Severity", StringComparison.OrdinalIgnoreCase)
+                    || field.Key.Equals("FailureBehavior", StringComparison.OrdinalIgnoreCase)
+                    || field.Key.Equals("NonInspectableBehavior", StringComparison.OrdinalIgnoreCase)) && field.GetChildren().Any()))
+                    throw new OptionsValidationException(Options.DefaultName, typeof(PanPolicyOptions), ["Invalid policy metadata configuration."]);
+            }
             var detector = policy.GetChildren().FirstOrDefault(child => child.Key.Equals("SecondaryPanDetection", StringComparison.OrdinalIgnoreCase));
             // Validate the effective IConfiguration scalar, not the binder's permissive bool conversion.
             if (detector is not null && ((!string.Equals(detector.Value, "true", StringComparison.OrdinalIgnoreCase)

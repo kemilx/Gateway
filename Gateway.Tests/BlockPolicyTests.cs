@@ -240,8 +240,12 @@ public sealed class BlockPolicyTests
         await using var hosts = await Hosts.Start("$.cards[*]", body, status, type);
         using var request = new HttpRequestMessage(scenario == "HEAD" ? HttpMethod.Head : HttpMethod.Get, "/protected/test");
         using var response = await hosts.Client.SendAsync(request);
-        Assert.Equal(status, (int)response.StatusCode);
-        Assert.Equal(scenario is "HEAD" or "204" or "304" ? "" : body, await response.Content.ReadAsStringAsync());
+        if (scenario == "304") await AssertError(response, InspectionError);
+        else
+        {
+            Assert.Equal(status, (int)response.StatusCode);
+            Assert.Equal(scenario is "HEAD" or "204" ? "" : body, await response.Content.ReadAsStringAsync());
+        }
         Assert.True(response.Headers.CacheControl!.NoStore);
         Assert.Equal((0, 0L), hosts.Budget.Snapshot);
     }

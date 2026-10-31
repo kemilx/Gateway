@@ -257,11 +257,12 @@ public sealed class SecondaryPanMatchTelemetryTests
             {
                 var outcome = Assert.Single(metrics.For(f.Policy, Outcomes));
                 Assert.Equal(1L, Assert.IsType<long>(outcome.Value));
-                Assert.Equal(scenario == "head" ? "excluded_head" : scenario == "media" ? "excluded_media_type" : "excluded_bodyless",
+                Assert.Equal(scenario == "304" ? "blocked" : scenario == "head" ? "excluded_head" : scenario == "media" ? "excluded_media_type" : "excluded_bodyless",
                     outcome.Tags["gateway.privacy.outcome"]);
             }
             else Assert.Empty(metrics.For(f.Policy, Outcomes));
             Assert.Equal((0, 0L), f.Budget.Snapshot);
+            if (scenario == "304") Assert.Equal(502, f.Context.HttpContext.Response.StatusCode);
         }
     }
 

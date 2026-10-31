@@ -109,6 +109,12 @@ public sealed class PrivacyTelemetry : IDisposable
 
     public void Dispose() => meter.Dispose();
 
+    internal void RecordPreflightBlocked(CompiledPanPolicy policy, Action<InspectionSummary>? completed)
+    {
+        RecordOutcome(policy, PrivacyInspectionOutcome.Blocked, durationMilliseconds: null);
+        Notify(completed, new(PrivacyInspectionOutcome.Blocked, 0, 0, 0));
+    }
+
     internal void RecordExclusion(CompiledPanPolicy policy, string outcome)
     {
         ArgumentNullException.ThrowIfNull(policy);

@@ -142,8 +142,9 @@ public sealed class PrivacyExclusionEventTests
         var context = Context(upstream);
         context.HttpContext.Request.Method = scenario.StartsWith("head") ? "HEAD" : "GET";
         await new PanResponseTransform(logs, telemetry, new NoInspectionClock()).ApplyAsync(context, Policy(mode));
-        var reason = scenario.StartsWith("head") ? "excluded_head" : scenario.StartsWith("204") || scenario.StartsWith("304") ? "excluded_bodyless" : "excluded_media_type";
-        AssertEvent(Assert.Single(logs.Events), reason, "unknown");
+        var rejected = scenario.StartsWith("304");
+        var reason = rejected ? "blocked" : scenario.StartsWith("head") ? "excluded_head" : scenario.StartsWith("204") ? "excluded_bodyless" : "excluded_media_type";
+        if (rejected) Assert.Empty(logs.Events); else AssertEvent(Assert.Single(logs.Events), reason, "unknown");
         var metric = Assert.Single(metrics.Values);
         Assert.Equal(Outcomes, metric.Name);
         Assert.Equal(1, metric.Value);
@@ -154,10 +155,11 @@ public sealed class PrivacyExclusionEventTests
         Assert.Equal(reason, metric.Tags["gateway.privacy.outcome"]);
         Assert.Equal(reason != "excluded_media_type", context.SuppressResponseBody);
         Assert.Equal("no-store", context.HttpContext.Response.Headers.CacheControl);
-        Assert.Equal(200, context.HttpContext.Response.StatusCode);
+        Assert.Equal(rejected ? 502 : 200, context.HttpContext.Response.StatusCode);
         Assert.Equal(0, content.ReadAttempts);
         Assert.Equal(beforeBudget, budget.Snapshot);
-        Assert.Equal(beforeDashboard, telemetry.DashboardMetrics);
+        if (rejected) Assert.Equal(beforeDashboard.Outcomes.Blocked + 1, telemetry.DashboardMetrics.Outcomes.Blocked);
+        else Assert.Equal(beforeDashboard, telemetry.DashboardMetrics);
     }
 
     [Fact]

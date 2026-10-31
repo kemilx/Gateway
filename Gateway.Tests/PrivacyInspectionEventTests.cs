@@ -264,10 +264,18 @@ public sealed class PrivacyInspectionEventTests
         if (scenario == "media") f.Context.ProxyResponse!.Content.Headers.ContentType = new("text/plain");
         if (scenario == "precancel") { f.Caller.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(f.Run); }
         else await f.Run();
-        Assert.Empty(f.Logs.Events); Assert.Equal(0, f.Logs.EventAttempts); Assert.Equal((0, 0L), f.Budget.Snapshot);
+        if (scenario == "304")
+        {
+            var terminal = Assert.Single(f.Logs.Events);
+            Assert.Equal("blocked", terminal.State["Outcome"]);
+            Assert.Equal(1, f.Logs.EventAttempts);
+            Assert.Equal(502, f.Context.HttpContext.Response.StatusCode);
+        }
+        else { Assert.Empty(f.Logs.Events); Assert.Equal(0, f.Logs.EventAttempts); }
+        Assert.Equal((0, 0L), f.Budget.Snapshot);
         Assert.Empty(f.Logs.Rules);
         Assert.Equal(0, f.Telemetry.DashboardMetrics.Duration.Samples);
-        Assert.Equal(scenario is "head" or "204" or "304" or "media" ? 1 : 0, f.Logs.Exclusions);
+        Assert.Equal(scenario is "head" or "204" or "media" ? 1 : 0, f.Logs.Exclusions);
     }
 
     [Fact]

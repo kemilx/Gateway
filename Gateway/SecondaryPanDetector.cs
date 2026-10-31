@@ -1,11 +1,15 @@
 namespace Gateway;
 
+internal enum PanClassification { NotCandidate, Candidate, HighConfidence }
+
 // Whole original decoded JSON string only; no issuer rules or free-text discovery.
 internal static class SecondaryPanDetector
 {
-    internal static bool IsMatch(string value)
+    internal static bool IsMatch(string value) => Classify(value) == PanClassification.HighConfidence;
+
+    internal static PanClassification Classify(string value)
     {
-        if (value.Length is < 13 or > 37) return false;
+        if (value.Length is < 13 or > 37) return PanClassification.NotCandidate;
         var digits = 0;
         var sum = 0;
         var doubleDigit = false;
@@ -23,8 +27,9 @@ internal static class SecondaryPanDetector
                 needsDigit = false;
             }
             else if (c is ' ' or '-' && !needsDigit && i > 0) needsDigit = true;
-            else return false;
+            else return PanClassification.NotCandidate;
         }
-        return !needsDigit && digits is >= 13 and <= 19 && sum % 10 == 0;
+        if (needsDigit || digits is < 13 or > 19) return PanClassification.NotCandidate;
+        return sum % 10 == 0 ? PanClassification.HighConfidence : PanClassification.Candidate;
     }
 }

@@ -161,7 +161,7 @@ public sealed class TechnicalCorrelationIntegrationTests
     [Theory]
     [InlineData("head", 200, "excluded_head")]
     [InlineData("empty", 204, "excluded_bodyless")]
-    [InlineData("notmodified", 304, "excluded_bodyless")]
+    [InlineData("notmodified", 502, "blocked")]
     [InlineData("text", 200, "excluded_media_type")]
     public async Task Exclusion_events_match_the_id_observed_upstream(string scenario, int status, string reason)
     {
@@ -172,10 +172,11 @@ public sealed class TechnicalCorrelationIntegrationTests
         var id = AssertGenerated(Assert.Single(f.Seen));
         await f.WaitEvents(1);
         var entry = Assert.Single(f.Logs.Events);
-        Assert.Equal(4, entry.Id.Id); Assert.Equal(id, entry.State["CorrelationId"]);
-        Assert.Equal(reason, entry.State["Reason"]); Assert.Equal("not_evaluated", entry.State["RuleEvaluation"]);
+        Assert.Equal(scenario == "notmodified" ? 5 : 4, entry.Id.Id); Assert.Equal(id, entry.State["CorrelationId"]);
+        if (scenario == "notmodified") Assert.Equal(reason, entry.State["Outcome"]);
+        else { Assert.Equal(reason, entry.State["Reason"]); Assert.Equal("not_evaluated", entry.State["RuleEvaluation"]); }
         Assert.Equal(1, entry.State["SchemaVersion"]);
-        Assert.Equal(scenario == "text" ? Body : "", await response.Content.ReadAsStringAsync());
+        Assert.Equal(scenario == "text" ? Body : scenario == "notmodified" ? "{\"code\":\"privacy_inspection_failed\"}" : "", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]

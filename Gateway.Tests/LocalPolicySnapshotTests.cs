@@ -32,6 +32,92 @@ public sealed class LocalPolicySnapshotTests : IDisposable
         return await Reader().ReadAsync(default);
     }
 
+    [Theory]
+    [InlineData("Low")] [InlineData("Medium")] [InlineData("High")] [InlineData("Critical")]
+    public async Task Metadata_fields_bind_and_snapshot_is_immutable(string severity)
+    {
+        var document = Document();
+        Policy(document)["Severity"] = severity;
+        Policy(document)["FailureBehavior"] = "FailClosed";
+        Policy(document)["NonInspectableBehavior"] = "ExcludeNonJson";
+        var policy = (await Load(document)).Catalog.Find("protected-payment")!;
+        Policy(document)["Severity"] = "changed";
+        Assert.Equal(severity, policy.Severity);
+        Assert.Equal("FailClosed", policy.FailureBehavior);
+        Assert.Equal("ExcludeNonJson", policy.NonInspectableBehavior);
+    }
+
+    [Fact]
+    public async Task Omitted_metadata_fields_compile_to_legacy_defaults()
+    {
+        var document = Document();
+        foreach (var name in new[] { "Severity", "FailureBehavior", "NonInspectableBehavior" }) Policy(document).Remove(name);
+        var policy = (await Load(document)).Catalog.Find("protected-payment")!;
+        Assert.Equal("High", policy.Severity);
+        Assert.Equal("FailClosed", policy.FailureBehavior);
+        Assert.Equal("ExcludeNonJson", policy.NonInspectableBehavior);
+    }
+
+    [Theory]
+    [InlineData("Severity", "null")] [InlineData("Severity", "\"\"")] [InlineData("Severity", "\" \"")]
+    [InlineData("Severity", "\"high\"")] [InlineData("Severity", "{}")] [InlineData("Severity", "[]")]
+    [InlineData("FailureBehavior", "null")] [InlineData("FailureBehavior", "\"\"")] [InlineData("FailureBehavior", "\" \"")]
+    [InlineData("FailureBehavior", "\"failclosed\"")] [InlineData("FailureBehavior", "{}")] [InlineData("FailureBehavior", "[]")]
+    [InlineData("NonInspectableBehavior", "null")] [InlineData("NonInspectableBehavior", "\"\"")] [InlineData("NonInspectableBehavior", "\" \"")]
+    [InlineData("NonInspectableBehavior", "\"unknown\"")] [InlineData("NonInspectableBehavior", "{}")] [InlineData("NonInspectableBehavior", "[]")]
+    public async Task Explicit_invalid_metadata_shapes_and_values_are_rejected(string field, string json)
+    {
+        var document = Document(); Policy(document)[field] = JsonNode.Parse(json);
+        Assert.Equal("invalid_configuration", (await Assert.ThrowsAsync<LocalPolicyReadException>(() => Load(document))).Reason);
+    }
+
+    [Fact]
+    public async Task Explicit_metadata_defaults_equal_omitted_values_for_publication()
+    {
+        var omitted = Document();
+        foreach (var field in new[] { "Severity", "FailureBehavior", "NonInspectableBehavior" }) Policy(omitted).Remove(field);
+        var first = await Load(omitted); var store = new LocalPolicySnapshots(first);
+        var explicitDefaults = Document();
+        Policy(explicitDefaults)["Severity"] = "High";
+        Policy(explicitDefaults)["FailureBehavior"] = "FailClosed";
+        Policy(explicitDefaults)["NonInspectableBehavior"] = "ExcludeNonJson";
+        Assert.False(store.Publish(await Load(explicitDefaults), default));
+        Assert.Same(first, store.Active);
+    }
+
+    [Theory]
+    [InlineData("Low")] [InlineData("Medium")] [InlineData("Critical")]
+    public async Task Metadata_change_requires_new_version_and_preserves_captured_snapshot(string severity)
+    {
+        var original = await Load(); var store = new LocalPolicySnapshots(original);
+        var captured = new LocalPolicyRequestCapture(original, original.Catalog.Find("protected-payment")!);
+        var document = Document(); Policy(document)["Severity"] = severity;
+        var candidate = await Load(document);
+        Assert.Equal("incompatible_snapshot", Assert.Throws<LocalPolicyReadException>(() => store.Publish(candidate, default)).Reason);
+        Assert.Same(original, store.Active); Assert.Equal("High", captured.Policy.Severity);
+        Policy(document)["Version"] = "v2";
+        Assert.True(store.Publish(await Load(document), default));
+        Assert.Equal(severity, store.Active.Catalog.Find("protected-payment")!.Severity);
+        Assert.Same(original, captured.Snapshot); Assert.Equal("High", captured.Policy.Severity);
+        Assert.Equal("FailClosed", captured.Policy.FailureBehavior);
+        Assert.Equal("ExcludeNonJson", captured.Policy.NonInspectableBehavior);
+    }
+
+    [Theory]
+    [InlineData("Severity")] [InlineData("FailureBehavior")] [InlineData("NonInspectableBehavior")]
+    public async Task Rejected_metadata_reload_retains_old_snapshot(string field)
+    {
+        var original = await Load(); var store = new LocalPolicySnapshots(original);
+        var document = Document(); Policy(document)[field] = "invalid"; Policy(document)["Version"] = "v2";
+        await LoadRaw(document);
+        using var reload = new LocalPolicyReloadService(Reader(), store, TimeProvider.System, new CaptureLogger());
+        await reload.ReloadAsync(default);
+        Assert.Same(original, store.Active);
+        Assert.Equal("High", store.Active.Catalog.Find("protected-payment")!.Severity);
+    }
+
+    private Task LoadRaw(JsonObject document) => File.WriteAllTextAsync(FilePath, document.ToJsonString());
+
     [Fact]
     public async Task Disabled_option_registers_no_reader_or_reload_service_and_preserves_default_catalog()
     {

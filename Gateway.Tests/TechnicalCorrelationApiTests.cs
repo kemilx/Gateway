@@ -108,25 +108,26 @@ public sealed class TechnicalCorrelationApiTests
         });
         await gateway.StartAsync();
         using var client = Client(gateway);
-        var excluded = scenario is "HEAD" or "nonJSON" or "204" or "304";
+        var excluded = scenario is "HEAD" or "nonJSON" or "204";
         using var request = new HttpRequestMessage(scenario == "HEAD" ? HttpMethod.Head : HttpMethod.Get,
-            scenario == "passthrough" ? "/passthrough/payment?query_marker=value_marker" : excluded ? "/protected/excluded?query_marker=value_marker" : "/protected/payment?query_marker=value_marker");
+            scenario == "passthrough" ? "/passthrough/payment?query_marker=value_marker" : excluded || scenario == "304" ? "/protected/excluded?query_marker=value_marker" : "/protected/payment?query_marker=value_marker");
         request.Headers.TryAddWithoutValidation(Header, new[] { "spoof_marker", Id });
         request.Headers.TryAddWithoutValidation("X-Private", "header_marker");
         using var response = await client.SendAsync(request); var text = await response.Content.ReadAsStringAsync();
         AssertNoEcho(response);
-        Assert.Equal(scenario == "Block" ? 502 : scenario == "204" ? 204 : scenario == "304" ? 304 : 200, (int)response.StatusCode);
-        Assert.Equal(scenario == "Block" ? "{\"code\":\"privacy_response_blocked\"}" : scenario is "HEAD" or "204" or "304" ? "" : scenario == "nonJSON" ? "body_marker" : scenario is "Observe" or "passthrough" ? SyntheticApi.Sample : "{\"payment\":{\"cardNumber\":\"************1111\",\"currency\":\"EUR\"},\"amount\":12.50,\"note\":\"synthetic-\\u00F1-\\uD83D\\uDE00\",\"items\":[true,null,7]}", text);
+        Assert.Equal(scenario is "Block" or "304" ? 502 : scenario == "204" ? 204 : 200, (int)response.StatusCode);
+        Assert.Equal(scenario == "304" ? "{\"code\":\"privacy_inspection_failed\"}" : scenario == "Block" ? "{\"code\":\"privacy_response_blocked\"}" : scenario is "HEAD" or "204" ? "" : scenario == "nonJSON" ? "body_marker" : scenario is "Observe" or "passthrough" ? SyntheticApi.Sample : "{\"payment\":{\"cardNumber\":\"************1111\",\"currency\":\"EUR\"},\"amount\":12.50,\"note\":\"synthetic-\\u00F1-\\uD83D\\uDE00\",\"items\":[true,null,7]}", text);
         var observation = Assert.Single(api.Logs.Events); var id = Assert.IsType<string>(observation.State["CorrelationId"]);
         AssertObservation(observation, id); Assert.NotEqual(Id, id);
-        var expectedCount = scenario == "passthrough" ? 0 : excluded ? 1 : 2;
+        var expectedCount = scenario == "passthrough" ? 0 : excluded || scenario == "304" ? 1 : 2;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         while (gatewayLogs.Events.Count(e => e.Id.Id is 4 or 5 or 6) < expectedCount) await Task.Delay(10, timeout.Token);
         var privacy = gatewayLogs.Events.Where(e => e.Id.Id is 4 or 5 or 6).ToArray();
         Assert.Equal(expectedCount, privacy.Length);
         Assert.All(privacy, e => { Assert.Equal(id, e.State["CorrelationId"]); Assert.Equal(1, e.State["SchemaVersion"]); Assert.Null(e.Exception); });
-        Assert.Equal(scenario == "passthrough" ? Array.Empty<int>() : excluded ? new[] { 4 } : new[] { 5, 6 }, privacy.Select(e => e.Id.Id).Order());
+        Assert.Equal(scenario == "passthrough" ? Array.Empty<int>() : excluded ? new[] { 4 } : scenario == "304" ? new[] { 5 } : new[] { 5, 6 }, privacy.Select(e => e.Id.Id).Order());
         if (excluded) Assert.Equal(scenario == "HEAD" ? "excluded_head" : scenario == "nonJSON" ? "excluded_media_type" : "excluded_bodyless", Assert.Single(privacy).State["Reason"]);
+        if (scenario == "304") Assert.Equal("blocked", Assert.Single(privacy).State["Outcome"]);
     }
 
     private static HttpRequestMessage Request(string[]? values)

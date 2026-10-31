@@ -81,8 +81,9 @@ public sealed class ProxyTests
                 using var request = new HttpRequestMessage(status == 200 ? HttpMethod.Head : HttpMethod.Get,
                     $"/protected/bodyless/{status}");
                 using var bodyless = await hosts.Client.SendAsync(request);
-                Assert.Equal(status, (int)bodyless.StatusCode);
-                Assert.Empty(await bodyless.Content.ReadAsByteArrayAsync());
+                Assert.Equal(status == 304 ? 502 : status, (int)bodyless.StatusCode);
+                if (status == 304) Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", await bodyless.Content.ReadAsStringAsync());
+                else Assert.Empty(await bodyless.Content.ReadAsByteArrayAsync());
             }
             Assert.Equal(1, hosts.Budget.Snapshot.ActiveInspections);
             if (ending == "cancel")
@@ -351,8 +352,9 @@ public sealed class ProxyTests
             return Task.CompletedTask;
         }));
         using var result = await hosts.Client.GetAsync("/protected/case");
-        Assert.Equal(status, (int)result.StatusCode);
-        Assert.Empty(await result.Content.ReadAsByteArrayAsync());
+        Assert.Equal(status == 304 ? 502 : status, (int)result.StatusCode);
+        if (status == 304) Assert.Equal("{\"code\":\"privacy_inspection_failed\"}", await result.Content.ReadAsStringAsync());
+        else Assert.Empty(await result.Content.ReadAsByteArrayAsync());
     }
 
     [Fact]

@@ -28,6 +28,43 @@ internal static class PolicyConfiguration
 public sealed class PolicyConfigurationTests
 {
     [Theory]
+    [InlineData("Low")] [InlineData("Medium")] [InlineData("High")] [InlineData("Critical")]
+    public async Task Effective_json_configuration_binds_metadata_values(string severity)
+    {
+        var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "pan-policy-defaults.json")))!;
+        var policy = root["PanPolicies"]!["Policies"]![0]!;
+        policy["Severity"] = severity; policy["FailureBehavior"] = "FailClosed"; policy["NonInspectableBehavior"] = "ExcludeNonJson";
+        using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(root.ToJsonString()));
+        await using var app = GatewayHost.Build([], configure: b =>
+        {
+            b.Configuration.Sources.Clear(); b.Configuration.AddJsonStream(stream); b.WebHost.UseUrls("http://127.0.0.1:0");
+        });
+        await app.StartAsync();
+        var compiled = app.Services.GetRequiredService<PanPolicyCatalog>().Find("protected-payment")!;
+        Assert.Equal(severity, compiled.Severity); Assert.Equal("FailClosed", compiled.FailureBehavior);
+        Assert.Equal("ExcludeNonJson", compiled.NonInspectableBehavior);
+    }
+
+    [Theory]
+    [InlineData("Severity", "null")] [InlineData("Severity", "\"\"")] [InlineData("Severity", "\" \"")] [InlineData("Severity", "\"unknown\"")] [InlineData("Severity", "{}")] [InlineData("Severity", "[]")]
+    [InlineData("FailureBehavior", "null")] [InlineData("FailureBehavior", "\"\"")] [InlineData("FailureBehavior", "\" \"")] [InlineData("FailureBehavior", "\"unknown\"")] [InlineData("FailureBehavior", "{}")] [InlineData("FailureBehavior", "[]")]
+    [InlineData("NonInspectableBehavior", "null")] [InlineData("NonInspectableBehavior", "\"\"")] [InlineData("NonInspectableBehavior", "\" \"")] [InlineData("NonInspectableBehavior", "\"unknown\"")] [InlineData("NonInspectableBehavior", "{}")] [InlineData("NonInspectableBehavior", "[]")]
+    public async Task Effective_json_configuration_rejects_explicit_invalid_metadata(string field, string value)
+    {
+        var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "pan-policy-defaults.json")))!;
+        root["PanPolicies"]!["Policies"]![0]![field] = System.Text.Json.Nodes.JsonNode.Parse(value);
+        using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(root.ToJsonString()));
+        await Assert.ThrowsAnyAsync<Exception>(async () =>
+        {
+            await using var app = GatewayHost.Build([], configure: b =>
+            {
+                b.Configuration.Sources.Clear(); b.Configuration.AddJsonStream(stream); b.WebHost.UseUrls("http://127.0.0.1:0");
+            });
+            await app.StartAsync();
+        });
+    }
+
+    [Theory]
     [InlineData("missing", "")]
     [InlineData("empty-required", "")]
     [InlineData("missing-version", "")]
