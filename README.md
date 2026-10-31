@@ -1,4 +1,4 @@
-# MVP-39 — Observabilidad local sintética
+# MVP-41 — Observabilidad local sintética y pruebas reproducibles
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
