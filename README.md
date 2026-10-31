@@ -1,6 +1,37 @@
-# MVP-42 — Límites de retención de observabilidad local verificados
+# MVP-43 — Matriz de aceptación y brechas del SRS
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
+
+## Estado frente al SRS (MVP-43)
+
+La [matriz de aceptación y brechas](docs/MVP43-acceptance-matrix.md) relaciona los
+13 requisitos funcionales, 9 no funcionales y 12 criterios de aceptación del
+[SRS v0.1](Documentos%20SRS/SRS.md) con fuentes, pruebas y trabajo pendiente.
+La cobertura técnica local se distingue de la aprobación del producto y de la
+preparación de un entorno operativo. Los criterios de aceptación reutilizan
+requisitos: no se deben sumar las 34 filas como si fueran tareas independientes.
+
+La estimación previa de aproximadamente 70% era orientativa, **no una medición
+del proyecto**. La matriz usa estados y conteos por familia, sin asignar pesos
+arbitrarios ni equiparar el número de pruebas o de MVP con avance porcentual.
+
+| Familia | Verificado localmente | Parcial |
+| --- | ---: | ---: |
+| Requisitos funcionales | 8/13 | 5/13 |
+| Requisitos no funcionales | 4/9 | 5/9 |
+| Criterios de aceptación (evidencia técnica, no aprobación formal) | 9/12 | 3/12 |
+
+MVP-43 es una revisión documental: reutiliza la evidencia .NET anterior de
+1474/1474 pruebas PASS sobre fuentes ejecutables sin cambios; no representa una
+nueva ejecución de esa suite. No concede aceptación del SRS, presupuestos de
+rendimiento ni autorización de piloto o producción.
+
+Los siguientes avances recomendados son cerrar las decisiones de contrato de
+políticas y caché, y definir y aprobar el entorno, la carga y los presupuestos de
+rendimiento antes de medir aceptación. Las brechas de contrato y operación
+permanecen explícitas en la matriz. Panel administrativo, SQL y
+distribución multiinstancia son evolución fuera del MVP, no bloqueos añadidos
+para cerrarlo.
 
 ## Ejecutar
 
