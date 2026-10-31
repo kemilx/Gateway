@@ -1,8 +1,45 @@
-# MVP-43 — Matriz de aceptación y brechas del SRS
+# MVP-44 — Políticas explícitas, clasificación PAN y rechazo seguro de 304
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
 
-## Estado frente al SRS (MVP-43)
+## Contrato vigente de protección (MVP-44)
+
+El [contrato de políticas, PAN y caché](docs/MVP44-policy-and-cache-contract.md)
+añade metadata validada `Severity` (Low/Medium/High/Critical, default High),
+`FailureBehavior=FailClosed` y `NonInspectableBehavior=ExcludeNonJson`. No hay
+fail-open ni selección de permisos por severidad. Los valores ausentes conservan
+defaults compatibles; valores explícitos inválidos se rechazan. La metadata se
+congela en cada snapshot y un cambio efectivo exige nueva versión. No cambia el
+DTO del dashboard ni los schemas de eventos.
+
+La clasificación PAN interna distingue NotCandidate, Candidate y HighConfidence.
+Solo HighConfidence (formato vigente + Luhn) activa la detección secundaria:
+Candidate no añade nuevas máscaras, eventos ni valores a telemetría. Las reglas
+explícitas conservan su prioridad incluso con Luhn negativo.
+
+**Cambio intencional:** un 304 upstream en ruta protegida y método distinto de HEAD
+ya no se conserva: se reemplaza por 502 `privacy_inspection_failed`, sin body ni
+headers upstream, con no-store y sin reservar presupuesto ni leer el origen.
+HEAD y 204 siguen sin cuerpo; passthrough continúa expresamente no protegido.
+Encoding/charset no soportados y 206 se rechazan antes de permitir la exclusión
+non-JSON. Esto sustituye cualquier descripción histórica de 304 protegido como
+exclusión normal; no añade body a una respuesta que conserve el estado 304.
+
+La [campaña reproducible](docs/MVP44-performance-campaign.md) utiliza el
+[perfil local fijado antes de medir](docs/MVP44-local-performance-profile.json).
+Sus gates comprueban integridad de medición y liberación, no presupuestos de
+negocio: los umbrales siguen `PENDING_APPROVAL`, sin aceptación de rendimiento,
+capacidad productiva ni autorización de despliegue.
+
+Validación MVP-44: build Release limpio (**0 warnings / 0 errors**), suite completa
+**1579/1579 PASS**, cero omitidos, y revisión de seguridad favorable únicamente
+local sobre el TARGET comprobado. La campaña completó tres pares y 3072 cuerpos
+exactos, más cuatro workers de memoria con presupuesto liberado. La inspección de
+1 MiB mostró coste alto (mediana pareada p95 +66.72 ms y throughput −88.97%):
+los gates de integridad pasaron, **el rendimiento de negocio no está aceptado**.
+El informe detalla límites, fuentes/binarios y reproducción.
+
+## Estado frente al SRS (MVP-43, actualizado en MVP-44)
 
 La [matriz de aceptación y brechas](docs/MVP43-acceptance-matrix.md) relaciona los
 13 requisitos funcionales, 9 no funcionales y 12 criterios de aceptación del
@@ -17,19 +54,19 @@ arbitrarios ni equiparar el número de pruebas o de MVP con avance porcentual.
 
 | Familia | Verificado localmente | Parcial |
 | --- | ---: | ---: |
-| Requisitos funcionales | 8/13 | 5/13 |
+| Requisitos funcionales | 12/13 | 1/13 |
 | Requisitos no funcionales | 4/9 | 5/9 |
-| Criterios de aceptación (evidencia técnica, no aprobación formal) | 9/12 | 3/12 |
+| Criterios de aceptación (evidencia técnica, no aprobación formal) | 10/12 | 2/12 |
 
-MVP-43 es una revisión documental: reutiliza la evidencia .NET anterior de
-1474/1474 pruebas PASS sobre fuentes ejecutables sin cambios; no representa una
-nueva ejecución de esa suite. No concede aceptación del SRS, presupuestos de
-rendimiento ni autorización de piloto o producción.
+MVP-43 fue una revisión documental con evidencia anterior de 1474/1474 PASS.
+MVP-44 modifica el motor y la sustituye por una ejecución nueva de 1579/1579 PASS.
+Los conteos describen cobertura técnica local, no aprobación formal del SRS,
+presupuestos de rendimiento ni autorización de piloto o producción.
 
-Los siguientes avances recomendados son cerrar las decisiones de contrato de
-políticas y caché, y definir y aprobar el entorno, la carga y los presupuestos de
-rendimiento antes de medir aceptación. Las brechas de contrato y operación
-permanecen explícitas en la matriz. Panel administrativo, SQL y
+Los siguientes avances recomendados son revisar las decisiones de contrato
+implementadas, diagnosticar el coste observado y definir/aprobar carga, entorno
+y presupuestos antes de una campaña de aceptación. Telemetría, privacidad y
+operación conservan brechas explícitas en la matriz. Panel administrativo, SQL y
 distribución multiinstancia son evolución fuera del MVP, no bloqueos añadidos
 para cerrarlo.
 

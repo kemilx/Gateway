@@ -1,0 +1,46 @@
+{
+  "schema": "gateway.local-performance-profile.v1",
+  "purpose": "LOCAL_OBSERVATIONAL_NOT_PERFORMANCE_ACCEPTANCE",
+  "data": "synthetic-token-dense-v1",
+  "bodyBytes": 1048576,
+  "buildConfiguration": "Release",
+  "compare": {
+    "requestsPerArm": 512,
+    "repetitions": 3,
+    "concurrency": 4,
+    "order": ["baseline-mask", "mask-baseline", "baseline-mask"],
+    "baseline": "same local YARP host via passthrough, without inspection",
+    "candidate": {
+      "admission": 8,
+      "maxConcurrentInspections": 6,
+      "maxReservedBodyBytes": 8388608,
+      "inspectionTimeoutSeconds": 10,
+      "headersDeadline": "off"
+    }
+  },
+  "memory": {
+    "concurrencies": [1, 2, 4, 8],
+    "maxConcurrentInspections": 8,
+    "maxReservedBodyBytes": 8388608,
+    "inspectionTimeoutSeconds": 120,
+    "classification": "MEASURED_NOT_SIZED"
+  },
+  "integrityGates": {
+    "allRequestsExactBodyValidated": true,
+    "allPairsValid": true,
+    "allMeasurementsPresentFiniteNonnegative": true,
+    "budgetsReleased": true,
+    "noSuccessFromPartialRun": true
+  },
+  "businessPerformanceBudget": {
+    "approvalStatus": "PENDING_APPROVAL",
+    "p50Ms": null,
+    "p95Ms": null,
+    "p99Ms": null,
+    "minimumRequestsPerSecond": null,
+    "maximumCpuMsPerRequest": null,
+    "maximumAllocatedBytesPerRequest": null,
+    "maximumProcessMemoryBytes": null
+  },
+  "productionApproved": false
+}
