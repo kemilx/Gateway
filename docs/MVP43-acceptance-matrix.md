@@ -1,4 +1,14 @@
-# Matriz de aceptación y brechas del SRS — actualizada en MVP-44
+# Matriz de aceptación y brechas del SRS — actualizada en MVP-46
+
+**Actualización MVP-46:** TARGET BASE `662f9c14bd7544bfa871888f8940a5597e33368b`
+más cambios de captura y sus pruebas; manifiesto SHA-256
+`1E9C1C6F9262287F66C322382E7DBF9924B20E59CBFC2B98F27A9137DDBE7E43`.
+Build limpio y **1618/1618 PASS**, cero omitidos, sustituyen el full funcional
+MVP-44 para el motor vigente. El [informe de captura/rendimiento](MVP46-deferred-capture-performance.md)
+documenta 39 casos nuevos, revisión de seguridad local, campaña del mismo perfil
+y asignaciones menores; **no mejora general de latencia ni aceptación de SLO**.
+RF/RNF/CA conservan sus estados y conteos: no se cierran presupuestos ni operación.
+El TARGET y las métricas MVP-44 siguientes permanecen como trazabilidad histórica.
 
 Fecha: 31 de octubre de 2026. TARGET MVP-44: BASE `08bb919ec2ca2b4c2c2f4fdefc10802720518bdc` + fuentes/binarios del manifiesto previo a la campaña; SHA-256 del manifiesto `89A4DAF465A1B5A8EAF650413600CDE40DF64A134DFF44094DEC00259A8F3636`. Se conserva el nombre del documento para no romper enlaces de MVP-43.
 Las fuentes verificadas se consolidaron sin cambios en `6396ec005ee2a8701fa3712509f0ad61d4a19a9e`; los binarios se ejecutaron antes de ese commit y siguen identificados por su manifiesto, no por una compilación posterior inventada.
@@ -7,7 +17,7 @@ Baseline: [SRS v0.1](../Documentos%20SRS/SRS.md), borrador del 15 de octubre. No
 ## 1. Qué mide esta revisión
 
 Se contrastan **13 RF, 9 RNF y 12 CA** con código y pruebas del repositorio. Es una
-matriz documental apoyada ahora en build y pruebas nuevas MVP-44, además de la
+matriz documental apoyada ahora en build y pruebas nuevas MVP-46, además de la
 evidencia anterior. No es aprobación de aceptación ni revisión de seguridad del
 entorno de producción. Los cambios técnicos se detallan en el
 [contrato MVP-44](MVP44-policy-and-cache-contract.md).
@@ -90,7 +100,14 @@ citan las pruebas reales de proxy cuando el criterio exige comportamiento HTTP.
 
 ## 5. Evidencia utilizada y cómo reproducir
 
-### Evidencia vigente MVP-44, 31 de octubre
+### Evidencia vigente MVP-46, 31 de octubre
+
+- Build Release limpio, **1618/1618 PASS**, cero omitidos; TRX SHA-256 `C49858E049871DFFD292E0782C547F625534CFD0E355BECAEDEB3E872124639F`.
+- [CaptureCapacityTests](../Gateway.Tests/CaptureCapacityTests.cs): capacidad y metadata falsa, EOF/límites reales, cancelación y lease. Los contratos anteriores se vuelven a comprobar con la suite completa, no solo con tests del helper.
+- [Campaña y contrato de captura MVP-46](MVP46-deferred-capture-performance.md): tres pares, 3072 cuerpos completos, cuatro workers y recursos liberados. Perfil MVP-44 intacto, asignaciones adicionales 6.73 MiB/req frente a 8.20 históricas; delta p95 +80.77 ms frente a +66.72. Reducción observada de asignaciones, **sin aceptación de rendimiento**.
+- Revisión de seguridad favorable solo local; comprobación posterior de hashes del TARGET y gates de integridad por el coordinador. La optimización se omite para límites públicos fuera de `1..16 MiB`. No hay cambios de SRS, dependencias, SDK o telemetría.
+
+### Evidencia histórica MVP-44, 31 de octubre
 
 - Build Release `--no-restore --no-incremental`: **0 warnings / 0 errors**. Suite completa posterior: **1579/1579 PASS**, cero omitidos, 1m32s. Comando: `dotnet test ProyectoSeguridad.slnx -c Release --no-build --no-restore --logger "trx;LogFileName=mvp44-full-final.trx" --results-directory <scratch>`.
 - TRX local bajo `Temp/opencode/MVP44-contract/tests/mvp44-full-final.trx`, SHA-256 `DA0874F48D4C13A1FDBAC25DF0005018847C240321106FAEBB11091677027F87`. Se cotejan resultados individuales, no solo un resumen textual del agente.

@@ -1,6 +1,24 @@
-# MVP-44 — Políticas explícitas, clasificación PAN y rechazo seguro de 304
+# MVP-46 — Captura diferida segura y reducción de asignaciones
 
 Slice local, datos exclusivamente sintéticos. .NET SDK **10.0.401**, ASP.NET Core 10 y **YARP 2.3.0**. No implementa todo el SRS ni está aprobado para producción.
+
+## Optimización verificada de captura (MVP-46)
+
+La [captura preasignada diferida](docs/MVP46-deferred-capture-performance.md)
+usa una longitud declarada acotada solo tras el primer read positivo, con lease
+adquirido y comprobación de bytes reales. La metadata upstream nunca delimita la
+lectura ni sustituye la validación completa. Sin pooling, preasignación de salida,
+cambios de políticas o paquetes. Una longitud falsa puede anticipar memoria hasta
+el límite del cuerpo; la reserva nominal no es un techo de RSS.
+
+Build Release limpio, **1618/1618 PASS**, cero omitidos, 39 casos nuevos y revisión
+de seguridad favorable solo local. Tres pares de carga validaron 3072 cuerpos
+exactos y cuatro workers de memoria comprobaron liberación/saturación. Con el
+mismo perfil de 1 MiB, el delta de asignaciones Mask menos baseline bajó de
+**8.20 a 6.73 MiB/req** (−17.91%, observación entre campañas separadas).
+**No se demostró una mejora general de latencia:** el delta p95 empeoró de +66.72
+a +80.77 ms. Rendimiento y capacidad de negocio siguen sin aceptar; el informe
+incluye reproducción, hashes y límites.
 
 ## Contrato vigente de protección (MVP-44)
 
@@ -39,7 +57,7 @@ exactos, más cuatro workers de memoria con presupuesto liberado. La inspección
 los gates de integridad pasaron, **el rendimiento de negocio no está aceptado**.
 El informe detalla límites, fuentes/binarios y reproducción.
 
-## Estado frente al SRS (MVP-43, actualizado en MVP-44)
+## Estado frente al SRS (MVP-43, actualizado en MVP-46)
 
 La [matriz de aceptación y brechas](docs/MVP43-acceptance-matrix.md) relaciona los
 13 requisitos funcionales, 9 no funcionales y 12 criterios de aceptación del
@@ -60,11 +78,14 @@ arbitrarios ni equiparar el número de pruebas o de MVP con avance porcentual.
 
 MVP-43 fue una revisión documental con evidencia anterior de 1474/1474 PASS.
 MVP-44 modifica el motor y la sustituye por una ejecución nueva de 1579/1579 PASS.
+MVP-46 sustituye esa evidencia funcional para el motor vigente por **1618/1618 PASS**;
+los resultados de las campañas anteriores permanecen históricos, no se inventa
+una ejecución posterior sobre esos binarios.
 Los conteos describen cobertura técnica local, no aprobación formal del SRS,
 presupuestos de rendimiento ni autorización de piloto o producción.
 
 Los siguientes avances recomendados son revisar las decisiones de contrato
-implementadas, diagnosticar el coste observado y definir/aprobar carga, entorno
+implementadas, aislar el coste restante de parseo/recorrido y definir/aprobar carga, entorno
 y presupuestos antes de una campaña de aceptación. Telemetría, privacidad y
 operación conservan brechas explícitas en la matriz. Panel administrativo, SQL y
 distribución multiinstancia son evolución fuera del MVP, no bloqueos añadidos
